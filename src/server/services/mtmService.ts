@@ -1,3 +1,5 @@
+import neo4j from "neo4j-driver";
+
 import { getNeo4jDriver } from "../db/neo4j.js";
 import { getProvider } from "../providers/index.js";
 
@@ -99,6 +101,7 @@ export async function getMtmCount(): Promise<number> {
 export async function getGraphSnapshot(limit = 40): Promise<GraphSnapshot> {
   const driver = getNeo4jDriver();
   const session = driver.session();
+  const normalizedLimit = Math.max(Math.floor(limit), 1);
 
   try {
     const nodeResult = await session.run(
@@ -111,7 +114,7 @@ export async function getGraphSnapshot(limit = 40): Promise<GraphSnapshot> {
               coalesce(n.communityId, -1) AS communityId
        ORDER BY n.consolidatedAt DESC
        LIMIT $limit`,
-          { limit }
+      { limit: neo4j.int(normalizedLimit) }
     );
 
     const nodes = nodeResult.records.map((record) => ({
