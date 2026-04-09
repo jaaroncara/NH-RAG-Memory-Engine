@@ -27,8 +27,6 @@ By structurally separating immediate temporal memory from generalized semantic k
 
 The remainder of this paper is structured as follows: Section 2 details the neurological analogs and the specific database technologies comprising the three memory tiers. Section 3 defines the mathematical and algorithmic mechanisms of Synaptic Pruning (forgetting). Section 4 outlines the asynchronous Sleep-Cycle Consolidation process. Section 5 presents the cascading retrieval workflow for real-time agent generation, followed by a discussion of future implementation challenges and conclusions.
 
-Here is the expanded and detailed continuation for **Section 2.1**.
-
 ***
 
 ## 2. The NH-RAG Architecture
@@ -72,8 +70,6 @@ Just as human working memory has a limited capacity and relies on continual disp
 
 Once an interaction session concludes, or a predefined chronological threshold is breached (e.g., 24 hours), the raw episodic logs residing in the STM are flagged for asynchronous batch processing. These raw transcripts provide the foundational "sensory" material that will be extracted, embedded, and mapped into the associative graph structure of the Medium-Term Memory (MTM)—after which, the STM can be safely truncated or archived to maintain optimal read/write speeds for the agent's active cognitive processes.
 
-Here is the detailed continuation for **Section 2.2**.
-
 ***
 
 ### 2.2 Medium-Term Memory (MTM): Associative Consolidation
@@ -107,8 +103,6 @@ This clustering mathematically identifies emerging macro-concepts in the agent's
 By partitioning the graph into these semantic communities, the MTM successfully structures the chaotic, chronological data of the STM into coherent thematic blocks. These communities serve as the exact data payloads that will be evaluated for survival. 
 
 As detailed in subsequent sections, the communities mapped within the MTM await two critical asynchronous operations. First, they will be subjected to the Salience Threshold during Synaptic Pruning (Section 3), where communities lacking sufficient associative density are algorithmic discarded. Second, the surviving communities will undergo Sleep-Cycle Consolidation (Section 4), where an LLM synthesizes the entire cluster into a single, highly dense rule or historical summary—this distilled artifact is what ultimately crosses the threshold to become a permanent, embedded resident of the Long-Term Memory.
-
-Here is the detailed continuation for **Section 2.3**.
 
 ***
 
@@ -152,8 +146,6 @@ If a semantic collision is detected (e.g., the new fact about Chicago collides w
 
 Through this neocortical analog, the LTM acts as a self-healing, continuously updating "DeepWiki" of the user and the agent's operating environment, ensuring absolute consistency in long-term autonomous execution.
 
-Here is the detailed and comprehensive continuation for **Section 3**.
-
 ***
 
 ## 3. The Mechanism of Algorithmic Forgetting
@@ -193,8 +185,6 @@ The inclusion of Algorithmic Forgetting fundamentally alters the economic and co
 In standard RAG architectures, storage and token costs scale linearly and infinitely over time ($O(n)$). If an agent interacts with a user for 1,000 turns a day, 1,000 embedded chunks are permanently added to the vector database, steadily increasing the latency of Approximate Nearest Neighbor (ANN) searches and increasing cloud hosting costs.
 
 In NH-RAG, storage growth is strictly capped. Because the system prunes the bottom quartile of noisy interactions, and highly dense interactions are synthesized into heavily compressed semantic rules (via LTM distillation), the physical size of the vector database scales logarithmically ($O(\log n)$). Algorithmic Forgetting ensures that agents can operate persistently for years without requiring continuous database migrations or suffering from exponential context-window token expenditures.
-
-Here is the detailed and comprehensive continuation for **Section 4**.
 
 ***
 
@@ -256,8 +246,6 @@ The cascading retrieval workflow represents a dramatic optimization in LLM token
 
 By contrast, the NH-RAG retrieval mechanism pulls exactly what is needed: a micro-batch of recent literal dialogue (STM) and a highly compressed semantic artifact (LTM). This ensures the context window remains exceptionally lean (often under 500 tokens), preserving the LLM's attention mechanism for complex reasoning tasks rather than forcing it to sort through an unstructured haystack of historical noise.
 
-Here is the detailed and comprehensive continuation for **Section 5**.
-
 ***
 
 ## 5. Theoretical Advantages Over Existing RAG Architectures
@@ -290,8 +278,6 @@ The Neuro-Hierarchical RAG (NH-RAG) architecture fundamentally re-engineers how 
 **The Problem with Existing GraphRAG Models:** Microsoft’s GraphRAG and similar architectures are highly effective at mapping relationships within a static corpus (e.g., a massive PDF or a corporate knowledge base). However, they struggle with mutable, continuous time-series data. They extract entities, but do not inherently synthesize evolving states of being.
 
 **The NH-RAG Advantage:** The MTM is not designed as a static knowledge graph, but rather as a transient topological staging ground. The use of community detection (Louvain) over vector-weighted edges allows the NH-RAG system to dynamically spot emerging trends in the user's behavior or environment over time. It mimics human inductive reasoning: the agent notices a cluster of related episodic events, deduces the underlying semantic truth, writes that truth to the Neocortex (LTM), and then burns down the hippocampal staging ground (MTM) to make room for new experiences. This creates an epistemologically evolving agent that matures alongside its user, rather than a static query engine.
-
-Here is the comprehensive and final section for the research paper.
 
 ***
 
