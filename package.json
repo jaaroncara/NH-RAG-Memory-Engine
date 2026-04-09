@@ -4,7 +4,10 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "tsx server.ts",
+    "dev": "tsx scripts/compose.ts up --build",
+    "dev:local": "tsx scripts/compose.ts up -d postgres neo4j docling && npm run dev:server",
+    "dev:server": "tsx server.ts",
+    "infra:down": "tsx scripts/compose.ts down",
     "build": "vite build",
     "preview": "vite preview",
     "clean": "rm -rf dist",

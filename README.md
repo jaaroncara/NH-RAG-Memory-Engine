@@ -152,7 +152,7 @@ User Input
 
 5. **Run the app:**
    ```bash
-   npm run dev
+   npm run dev:local
    ```
    Opens at [http://localhost:3000](http://localhost:3000). This single process hosts both the Express backend and the Vite-powered frontend.
 
@@ -160,27 +160,62 @@ User Input
 
 ### 1. Infrastructure services
 
+The commands below can be run with either Docker or Podman. The project scripts now prefer `podman` automatically when it is installed and fall back to `docker` otherwise.
+
 Start PostgreSQL, Neo4j, and the Docling sidecar:
 
 ```bash
-docker compose up -d postgres neo4j docling
+podman compose up -d postgres neo4j docling
 ```
 
 If you prefer to start everything defined in Compose:
 
 ```bash
-docker compose up -d
+podman compose up -d
 ```
 
-### 2. Application service
+### 2. Full stack with one command
 
-Start the combined backend and frontend dev server:
+To build and run the entire stack in containers, including the app itself:
 
 ```bash
 npm run dev
 ```
 
-This project does **not** run separate frontend and backend dev commands right now. `npm run dev` starts the Express server in [server.ts](server.ts), and that server mounts Vite middleware so the React frontend is served from the same process on port `3000`.
+This now runs:
+
+```bash
+podman compose up --build
+```
+
+That single command starts:
+
+- `postgres`
+- `neo4j`
+- `docling`
+- `app`
+
+The `app` container automatically runs the Postgres migration before starting the server.
+
+### 3. Local app process with containerized dependencies
+
+If you prefer to run the Node app on your host machine while still using Docker for Postgres, Neo4j, and Docling:
+
+```bash
+npm run dev:local
+```
+
+This brings up the dependency containers and then starts the local Node/Vite app process.
+
+### 4. Direct local server only
+
+If your infra is already running and you only want the local app server:
+
+```bash
+npm run dev:server
+```
+
+This project does **not** run separate frontend and backend dev commands. The Node server in [server.ts](server.ts) mounts Vite middleware, so the React frontend is served from the same process on port `3000`.
 
 ### 3. Optional migration step for existing databases
 
@@ -205,7 +240,7 @@ You only need to run it again when new SQL files are added under `db/migrations`
 
 3. Start infrastructure:
    ```bash
-   docker compose up -d postgres neo4j docling
+   podman compose up -d postgres neo4j docling
    ```
 
 4. Install Node dependencies:
@@ -220,7 +255,7 @@ You only need to run it again when new SQL files are added under `db/migrations`
 
 6. Start the app server and frontend:
    ```bash
-   npm run dev
+   npm run dev:local
    ```
 
 7. Open the operator console:
@@ -240,6 +275,24 @@ If `npm run db:migrate` fails, verify that:
 - PostgreSQL is reachable on the `DATABASE_URL` in `.env.local`
 - the `vector` extension exists in your Postgres container
 - you are running the command from the project root
+
+## Podman Notes
+
+- `npm run dev` and `npm run dev:local` now prefer Podman automatically.
+- If both Podman and Docker are installed, the scripts choose `podman` first.
+- You can still run Compose manually with `podman compose ...` if you want direct control.
+- To stop the stack from the project root, run:
+
+```bash
+npm run infra:down
+```
+
+## Command Summary
+
+- Full containerized stack: `npm run dev`
+- Local app + containerized infra: `npm run dev:local`
+- Local app only: `npm run dev:server`
+- Run tracked Postgres migrations: `npm run db:migrate`
 
 ## Operator Console
 

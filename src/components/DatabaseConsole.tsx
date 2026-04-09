@@ -154,13 +154,13 @@ export default function DatabaseConsole() {
     : [];
 
   return (
-    <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(250,204,21,0.14),_transparent_30%),linear-gradient(180deg,_#07111f_0%,_#0f172a_42%,_#111827_100%)] text-slate-100">
-      <div className="mx-auto grid min-h-screen max-w-[1600px] grid-cols-1 gap-6 px-4 py-4 lg:grid-cols-[240px_minmax(0,1fr)] lg:px-6">
-        <aside className="rounded-[28px] border border-white/10 bg-slate-950/60 p-4 backdrop-blur">
+    <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(96,165,250,0.16),_transparent_28%),radial-gradient(circle_at_80%_0%,_rgba(30,41,59,0.38),_transparent_24%),linear-gradient(180deg,_#050816_0%,_#09101c_48%,_#0c1425_100%)] text-slate-100">
+      <div className="mx-auto grid min-h-screen max-w-[1600px] grid-cols-1 gap-5 px-4 py-5 lg:grid-cols-[228px_minmax(0,1fr)] lg:px-6">
+        <aside className="rounded-[18px] border border-white/10 bg-slate-950/68 p-4 shadow-[0_18px_50px_rgba(2,6,23,0.34)] backdrop-blur-xl">
           <div className="mb-8 space-y-2">
-            <p className="text-xs uppercase tracking-[0.28em] text-amber-300/80">NH-RAG Ops</p>
-            <h1 className="text-2xl font-semibold tracking-tight text-white">Database Control Plane</h1>
-            <p className="text-sm text-slate-400">Inspect document ingestion, STM queues, MTM graph topology, and long-term fact distillation.</p>
+            <p className="text-xs uppercase tracking-[0.3em] text-sky-300/70">NH-RAG Ops</p>
+            <h1 className="font-heading text-2xl font-semibold tracking-tight text-white">Database Control Plane</h1>
+            <p className="text-sm leading-6 text-slate-400">Inspect document ingestion, STM queues, MTM graph topology, and long-term fact distillation.</p>
           </div>
 
           <nav className="space-y-2">
@@ -172,10 +172,10 @@ export default function DatabaseConsole() {
                   to={item.to}
                   end={item.to === "/"}
                   className={({ isActive }) =>
-                    `flex items-center gap-3 rounded-2xl px-3 py-3 text-sm transition ${
+                    `flex items-center gap-3 rounded-[14px] border px-3 py-3 text-sm transition-all duration-150 ${
                       isActive
-                        ? "bg-amber-300 text-slate-950 shadow-[0_10px_40px_rgba(251,191,36,0.22)]"
-                        : "text-slate-300 hover:bg-white/5 hover:text-white"
+                        ? "border-sky-300/35 bg-sky-300/90 text-slate-950 shadow-[0_12px_32px_rgba(56,189,248,0.24)]"
+                        : "border-transparent text-slate-300 hover:border-white/10 hover:bg-white/6 hover:text-white active:scale-[0.99]"
                     }`
                   }
                 >
@@ -186,16 +186,16 @@ export default function DatabaseConsole() {
             })}
           </nav>
 
-          <Card className="mt-8 border-white/10 bg-white/5 text-slate-100 shadow-none">
+          <Card className="mt-8 border-white/10 bg-white/4 text-slate-100 shadow-none hover:translate-y-0">
             <CardHeader>
               <CardTitle className="text-sm">Infrastructure</CardTitle>
               <CardDescription className="text-slate-400">Current service health</CardDescription>
             </CardHeader>
             <CardContent className="space-y-3 text-sm">
               {Object.entries(health).map(([service, status]) => (
-                <div key={service} className="flex items-center justify-between rounded-2xl border border-white/10 px-3 py-2">
+                <div key={service} className="flex items-center justify-between rounded-[14px] border border-white/10 bg-white/[0.03] px-3 py-2.5 transition-colors hover:border-white/16 hover:bg-white/[0.05]">
                   <span className="capitalize text-slate-300">{service}</span>
-                  <Badge className={status === "ok" ? "bg-emerald-300 text-emerald-950" : "bg-rose-300 text-rose-950"}>{status}</Badge>
+                  <Badge className={status === "ok" ? "bg-emerald-300/90 text-emerald-950" : "bg-rose-300/90 text-rose-950"}>{status}</Badge>
                 </div>
               ))}
             </CardContent>
@@ -203,17 +203,17 @@ export default function DatabaseConsole() {
         </aside>
 
         <main className="space-y-6">
-          <div className="flex flex-col gap-4 rounded-[28px] border border-white/10 bg-slate-950/50 p-5 backdrop-blur xl:flex-row xl:items-center xl:justify-between">
+          <div className="flex flex-col gap-4 rounded-[18px] border border-white/10 bg-slate-950/56 p-5 shadow-[0_12px_32px_rgba(2,6,23,0.24)] backdrop-blur-xl xl:flex-row xl:items-center xl:justify-between">
             <div>
-              <p className="text-xs uppercase tracking-[0.28em] text-slate-400">Operator Surface</p>
-              <h2 className="mt-1 text-3xl font-semibold">{navItems.find((item) => (item.to === "/" ? location.pathname === "/" : location.pathname.startsWith(item.to)))?.label ?? "Overview"}</h2>
+              <p className="text-xs uppercase tracking-[0.28em] text-slate-500">Operator Surface</p>
+              <h2 className="mt-1 font-heading text-3xl font-semibold">{navItems.find((item) => (item.to === "/" ? location.pathname === "/" : location.pathname.startsWith(item.to)))?.label ?? "Overview"}</h2>
             </div>
             <div className="flex flex-wrap gap-3">
-              <Button variant="outline" className="border-white/10 bg-white/5 text-slate-100 hover:bg-white/10" onClick={() => void refreshAll()}>
+              <Button variant="outline" className="border-white/10 bg-white/[0.04] text-slate-100 hover:bg-white/[0.08]" onClick={() => void refreshAll()}>
                 <RefreshCw className={`mr-2 h-4 w-4 ${isPending ? "animate-spin" : ""}`} />
                 Refresh
               </Button>
-              <Button className="bg-amber-300 text-slate-950 hover:bg-amber-200" onClick={() => void handleSleepCycle()}>
+              <Button className="bg-sky-300 text-slate-950 hover:bg-sky-200" onClick={() => void handleSleepCycle()}>
                 <ServerCog className="mr-2 h-4 w-4" />
                 Run Sleep-Cycle
               </Button>
@@ -285,7 +285,7 @@ function OverviewView({
             { label: "MTM Nodes", value: metrics?.cards.mtm ?? 0 },
             { label: "LTM Facts", value: metrics?.cards.ltm ?? 0 },
           ].map((card) => (
-            <Card key={card.label} className="border-white/10 bg-white/5 text-slate-100 shadow-none">
+            <Card key={card.label} className="border-white/10 bg-white/[0.04] text-slate-100 shadow-none">
               <CardHeader>
                 <CardDescription className="text-slate-400">{card.label}</CardDescription>
                 <CardTitle className="text-3xl font-semibold">{card.value}</CardTitle>
@@ -294,7 +294,7 @@ function OverviewView({
           ))}
         </div>
 
-        <Card className="border-white/10 bg-white/5 text-slate-100 shadow-none">
+        <Card className="border-white/10 bg-white/[0.04] text-slate-100 shadow-none">
           <CardHeader>
             <CardTitle>Tier Footprint</CardTitle>
             <CardDescription className="text-slate-400">Current database distribution across the memory tiers</CardDescription>
@@ -304,15 +304,15 @@ function OverviewView({
               <AreaChart data={chartData} margin={{ left: 12, right: 12, top: 10, bottom: 0 }}>
                 <defs>
                   <linearGradient id="tierFill" x1="0" x2="0" y1="0" y2="1">
-                    <stop offset="0%" stopColor="#fbbf24" stopOpacity={0.9} />
-                    <stop offset="100%" stopColor="#fb923c" stopOpacity={0.12} />
+                    <stop offset="0%" stopColor="#7dd3fc" stopOpacity={0.8} />
+                    <stop offset="100%" stopColor="#38bdf8" stopOpacity={0.08} />
                   </linearGradient>
                 </defs>
                 <CartesianGrid stroke="rgba(255,255,255,0.08)" vertical={false} />
                 <XAxis dataKey="label" stroke="rgba(226,232,240,0.7)" />
                 <YAxis stroke="rgba(226,232,240,0.7)" allowDecimals={false} />
-                <Tooltip contentStyle={{ background: "#0f172a", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 16 }} />
-                <Area type="monotone" dataKey="value" stroke="#fbbf24" fill="url(#tierFill)" strokeWidth={2.5} />
+                <Tooltip contentStyle={{ background: "#08101b", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 14 }} />
+                <Area type="monotone" dataKey="value" stroke="#7dd3fc" fill="url(#tierFill)" strokeWidth={2.5} />
               </AreaChart>
             </ResponsiveContainer>
           </CardContent>
@@ -320,14 +320,14 @@ function OverviewView({
       </div>
 
       <div className="space-y-6">
-        <Card className="border-white/10 bg-white/5 text-slate-100 shadow-none">
+        <Card className="border-white/10 bg-white/[0.04] text-slate-100 shadow-none">
           <CardHeader>
             <CardTitle>Recent Pipeline Jobs</CardTitle>
             <CardDescription className="text-slate-400">Most recent ingestion and consolidation activity</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
             {(metrics?.recentJobs ?? []).slice(0, 6).map((job) => (
-              <div key={job.jobId} className="rounded-2xl border border-white/10 bg-slate-950/50 p-3">
+              <div key={job.jobId} className="rounded-[14px] border border-white/10 bg-slate-950/50 p-3 transition-colors hover:border-white/16 hover:bg-slate-950/72">
                 <div className="flex items-start justify-between gap-3">
                   <div>
                     <p className="font-medium text-white">{job.jobType}</p>
@@ -341,7 +341,7 @@ function OverviewView({
           </CardContent>
         </Card>
 
-        <Card className="border-white/10 bg-white/5 text-slate-100 shadow-none">
+        <Card className="border-white/10 bg-white/[0.04] text-slate-100 shadow-none">
           <CardHeader>
             <CardTitle>Recent Document Activity</CardTitle>
             <CardDescription className="text-slate-400">Jump straight into the latest imported documents</CardDescription>
@@ -351,12 +351,12 @@ function OverviewView({
               <button
                 key={event.eventId}
                 type="button"
-                className="w-full rounded-2xl border border-white/10 bg-slate-950/40 p-3 text-left transition hover:border-amber-300/50 hover:bg-slate-950/70"
+                className="group w-full rounded-[14px] border border-white/10 bg-slate-950/40 p-3 text-left transition-all duration-150 hover:border-sky-300/40 hover:bg-slate-950/72 active:scale-[0.995]"
                 onClick={() => (event.documentId ? void openDocument(event.documentId) : undefined)}
               >
                 <div className="flex items-center justify-between gap-3">
                   <p className="font-medium text-white">{event.message}</p>
-                  <ArrowUpRight className="h-4 w-4 text-slate-500" />
+                  <ArrowUpRight className="h-4 w-4 text-slate-500 transition-transform group-hover:translate-x-0.5" />
                 </div>
                 <p className="mt-1 text-xs uppercase tracking-[0.24em] text-slate-500">{event.stage}</p>
               </button>
@@ -386,14 +386,14 @@ function DocumentsView({
   return (
     <div className="grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
       <div className="space-y-6">
-        <Card className="border-white/10 bg-white/5 text-slate-100 shadow-none">
+        <Card className="border-white/10 bg-white/[0.04] text-slate-100 shadow-none">
           <CardHeader>
             <CardTitle>Doc Import Workspace</CardTitle>
             <CardDescription className="text-slate-400">Upload one or more files into STM through the Docling ingestion flow.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
-            <label className="flex min-h-44 cursor-pointer flex-col items-center justify-center rounded-[28px] border border-dashed border-amber-300/35 bg-slate-950/40 px-6 text-center transition hover:border-amber-300 hover:bg-slate-950/70">
-              <FileStack className="mb-3 h-8 w-8 text-amber-300" />
+            <label className="flex min-h-44 cursor-pointer flex-col items-center justify-center rounded-[16px] border border-dashed border-sky-300/30 bg-slate-950/42 px-6 text-center transition-all duration-150 hover:border-sky-300/70 hover:bg-slate-950/72 hover:shadow-[0_18px_40px_rgba(14,165,233,0.12)] active:scale-[0.998]">
+              <FileStack className="mb-3 h-8 w-8 text-sky-300" />
               <span className="text-lg font-medium">Drop files here or browse</span>
               <span className="mt-1 text-sm text-slate-400">PDF, DOCX, PPTX, Markdown, text, and other Docling-supported formats</span>
               <input
@@ -404,17 +404,17 @@ function DocumentsView({
               />
             </label>
             {selectedFiles.length > 0 ? (
-              <div className="rounded-2xl border border-white/10 bg-slate-950/50 p-4">
+              <div className="rounded-[16px] border border-white/10 bg-slate-950/50 p-4">
                 <p className="mb-3 text-sm font-medium text-white">Ready to import</p>
                 <div className="space-y-2">
                   {selectedFiles.map((file) => (
-                    <div key={`${file.name}-${file.size}`} className="flex items-center justify-between rounded-2xl border border-white/10 px-3 py-2 text-sm">
+                    <div key={`${file.name}-${file.size}`} className="flex items-center justify-between rounded-[14px] border border-white/10 bg-white/[0.03] px-3 py-2 text-sm">
                       <span>{file.name}</span>
                       <span className="text-slate-400">{formatBytes(file.size)}</span>
                     </div>
                   ))}
                 </div>
-                <Button className="mt-4 bg-amber-300 text-slate-950 hover:bg-amber-200" onClick={() => void handleUpload()}>
+                <Button className="mt-4 bg-sky-300 text-slate-950 hover:bg-sky-200" onClick={() => void handleUpload()}>
                   Start Import
                 </Button>
               </div>
@@ -422,7 +422,7 @@ function DocumentsView({
           </CardContent>
         </Card>
 
-        <Card className="border-white/10 bg-white/5 text-slate-100 shadow-none">
+        <Card className="border-white/10 bg-white/[0.04] text-slate-100 shadow-none">
           <CardHeader>
             <CardTitle>Imported Documents</CardTitle>
             <CardDescription className="text-slate-400">Persisted document records and parse state</CardDescription>
@@ -432,7 +432,7 @@ function DocumentsView({
               <button
                 key={document.documentId}
                 type="button"
-                className="w-full rounded-2xl border border-white/10 bg-slate-950/40 p-4 text-left transition hover:border-amber-300/40 hover:bg-slate-950/70"
+                className="w-full rounded-[16px] border border-white/10 bg-slate-950/40 p-4 text-left transition-all duration-150 hover:border-sky-300/35 hover:bg-slate-950/72 active:scale-[0.995]"
                 onClick={() => void openDocument(document.documentId)}
               >
                 <div className="flex items-start justify-between gap-3">
@@ -448,7 +448,7 @@ function DocumentsView({
         </Card>
       </div>
 
-      <Card className="border-white/10 bg-white/5 text-slate-100 shadow-none">
+      <Card className="border-white/10 bg-white/[0.04] text-slate-100 shadow-none">
         <CardHeader>
           <CardTitle>Document Detail</CardTitle>
           <CardDescription className="text-slate-400">Inspect chunk lineage and the document-specific event stream.</CardDescription>
@@ -456,13 +456,13 @@ function DocumentsView({
         <CardContent>
           {selectedDocument ? (
             <div className="space-y-5">
-              <div className="rounded-[28px] border border-white/10 bg-slate-950/50 p-5">
+              <div className="rounded-[16px] border border-white/10 bg-slate-950/50 p-5">
                 <div className="flex flex-wrap items-center justify-between gap-3">
                   <div>
                     <h3 className="text-xl font-semibold text-white">{selectedDocument.filename}</h3>
                     <p className="mt-1 text-sm text-slate-400">{selectedDocument.mimeType} · {formatBytes(selectedDocument.fileSizeBytes)}</p>
                   </div>
-                  <Badge className="bg-amber-300 text-slate-950">{selectedDocument.importStatus}</Badge>
+                  <Badge className="bg-sky-300 text-slate-950">{selectedDocument.importStatus}</Badge>
                 </div>
                 {selectedDocument.summary ? <p className="mt-4 text-sm text-slate-300">{selectedDocument.summary}</p> : null}
               </div>
@@ -470,10 +470,10 @@ function DocumentsView({
               <div className="grid gap-6 lg:grid-cols-2">
                 <div>
                   <p className="mb-3 text-sm font-medium uppercase tracking-[0.22em] text-slate-400">Chunks</p>
-                  <ScrollArea className="h-[420px] rounded-[28px] border border-white/10 bg-slate-950/50 p-4">
+                  <ScrollArea className="h-[420px] rounded-[16px] border border-white/10 bg-slate-950/50 p-4">
                     <div className="space-y-3">
                       {selectedDocument.chunks.map((chunk) => (
-                        <div key={chunk.chunkId} className="rounded-2xl border border-white/10 bg-white/5 p-3">
+                        <div key={chunk.chunkId} className="rounded-[14px] border border-white/10 bg-white/[0.03] p-3 transition-colors hover:border-white/16 hover:bg-white/[0.05]">
                           <div className="flex items-center justify-between gap-3">
                             <p className="font-medium text-white">Chunk {chunk.chunkIndex + 1}</p>
                             <span className="text-xs uppercase tracking-[0.2em] text-slate-500">{chunk.tokenEstimate} tok</span>
@@ -487,10 +487,10 @@ function DocumentsView({
 
                 <div>
                   <p className="mb-3 text-sm font-medium uppercase tracking-[0.22em] text-slate-400">Pipeline Events</p>
-                  <ScrollArea className="h-[420px] rounded-[28px] border border-white/10 bg-slate-950/50 p-4">
+                  <ScrollArea className="h-[420px] rounded-[16px] border border-white/10 bg-slate-950/50 p-4">
                     <div className="space-y-3">
                       {selectedDocument.events.map((event) => (
-                        <div key={event.eventId} className="rounded-2xl border border-white/10 bg-white/5 p-3">
+                        <div key={event.eventId} className="rounded-[14px] border border-white/10 bg-white/[0.03] p-3 transition-colors hover:border-white/16 hover:bg-white/[0.05]">
                           <div className="flex items-center justify-between gap-3">
                             <p className="font-medium text-white">{event.message}</p>
                             <Badge className="bg-white/10 text-slate-100">{event.stage}</Badge>
@@ -504,7 +504,7 @@ function DocumentsView({
               </div>
             </div>
           ) : (
-            <div className="flex min-h-[400px] items-center justify-center rounded-[28px] border border-dashed border-white/10 text-slate-400">
+            <div className="flex min-h-[400px] items-center justify-center rounded-[16px] border border-dashed border-white/10 text-slate-400">
               Select a document to inspect its chunks and event timeline.
             </div>
           )}
@@ -526,7 +526,7 @@ function StmView({
   refreshStm: () => Promise<void>;
 }) {
   return (
-    <Card className="border-white/10 bg-white/5 text-slate-100 shadow-none">
+    <Card className="border-white/10 bg-white/[0.04] text-slate-100 shadow-none">
       <CardHeader>
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div>
@@ -540,14 +540,14 @@ function StmView({
               placeholder="Filter by content"
               className="border-white/10 bg-slate-950/50 text-slate-100"
             />
-            <Button variant="outline" className="border-white/10 bg-white/5 text-slate-100 hover:bg-white/10" onClick={() => void refreshStm()}>
+            <Button variant="outline" className="border-white/10 bg-white/[0.04] text-slate-100 hover:bg-white/[0.08]" onClick={() => void refreshStm()}>
               Apply
             </Button>
           </div>
         </div>
       </CardHeader>
       <CardContent>
-        <div className="overflow-hidden rounded-[28px] border border-white/10">
+        <div className="overflow-hidden rounded-[16px] border border-white/10 bg-slate-950/36">
           <table className="min-w-full divide-y divide-white/10 text-sm">
             <thead className="bg-slate-950/70 text-slate-400">
               <tr>
@@ -558,9 +558,9 @@ function StmView({
                 <th className="px-4 py-3 text-left font-medium">Timestamp</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-white/10 bg-white/5">
+            <tbody className="divide-y divide-white/10 bg-white/[0.03]">
               {stm.entries.map((entry) => (
-                <tr key={entry.interactionId}>
+                <tr key={entry.interactionId} className="transition-colors hover:bg-white/[0.04]">
                   <td className="px-4 py-3"><Badge className="bg-white/10 text-slate-100">{entry.actor}</Badge></td>
                   <td className="px-4 py-3 text-slate-300">{entry.sessionId}</td>
                   <td className="px-4 py-3 text-slate-400">{entry.sourceType ?? "conversation"}</td>
@@ -586,7 +586,7 @@ function MtmView({ graph }: { graph: GraphSnapshot }) {
           { label: "Edges", value: graph.stats.edgeCount },
           { label: "Communities", value: graph.stats.communityCount },
         ].map((card) => (
-          <Card key={card.label} className="border-white/10 bg-white/5 text-slate-100 shadow-none">
+          <Card key={card.label} className="border-white/10 bg-white/[0.04] text-slate-100 shadow-none">
             <CardHeader>
               <CardDescription className="text-slate-400">{card.label}</CardDescription>
               <CardTitle className="text-3xl">{card.value}</CardTitle>
@@ -594,7 +594,7 @@ function MtmView({ graph }: { graph: GraphSnapshot }) {
           </Card>
         ))}
       </div>
-      <Card className="border-white/10 bg-white/5 text-slate-100 shadow-none">
+      <Card className="border-white/10 bg-white/[0.04] text-slate-100 shadow-none">
         <CardHeader>
           <CardTitle>Neo4j Medium-Term Memory Graph</CardTitle>
           <CardDescription className="text-slate-400">A bounded subgraph of the latest episodic nodes with similarity edges and community coloring.</CardDescription>
@@ -609,14 +609,14 @@ function MtmView({ graph }: { graph: GraphSnapshot }) {
 
 function LtmView({ ltm }: { ltm: { facts: SemanticFact[]; total: number } }) {
   return (
-    <Card className="border-white/10 bg-white/5 text-slate-100 shadow-none">
+    <Card className="border-white/10 bg-white/[0.04] text-slate-100 shadow-none">
       <CardHeader>
         <CardTitle>Long-Term Memory Fact Store</CardTitle>
         <CardDescription className="text-slate-400">pgvector-backed semantic facts distilled from MTM communities</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         {ltm.facts.map((fact) => (
-          <div key={fact.knowledgeId} className="rounded-[28px] border border-white/10 bg-slate-950/50 p-4">
+          <div key={fact.knowledgeId} className="rounded-[16px] border border-white/10 bg-slate-950/50 p-4 transition-colors hover:border-white/16 hover:bg-slate-950/72">
             <div className="flex items-start justify-between gap-3">
               <p className="text-base font-medium text-white">{fact.distilledFact}</p>
               <Badge className="bg-white/10 text-slate-100">{fact.provenance?.length ?? 0} sources</Badge>
@@ -633,14 +633,14 @@ function LtmView({ ltm }: { ltm: { facts: SemanticFact[]; total: number } }) {
 function JobsView({ jobs, events }: { jobs: JobRecord[]; events: PipelineEvent[] }) {
   return (
     <div className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
-      <Card className="border-white/10 bg-white/5 text-slate-100 shadow-none">
+      <Card className="border-white/10 bg-white/[0.04] text-slate-100 shadow-none">
         <CardHeader>
           <CardTitle>Pipeline Jobs</CardTitle>
           <CardDescription className="text-slate-400">Tracked ingestion and consolidation runs</CardDescription>
         </CardHeader>
         <CardContent className="space-y-3">
           {jobs.map((job) => (
-            <div key={job.jobId} className="rounded-[28px] border border-white/10 bg-slate-950/50 p-4">
+            <div key={job.jobId} className="rounded-[16px] border border-white/10 bg-slate-950/50 p-4 transition-colors hover:border-white/16 hover:bg-slate-950/72">
               <div className="flex items-center justify-between gap-3">
                 <div>
                   <p className="font-medium text-white">{job.jobType}</p>
@@ -649,7 +649,7 @@ function JobsView({ jobs, events }: { jobs: JobRecord[]; events: PipelineEvent[]
                 <Badge className="bg-white/10 text-slate-100">{job.status}</Badge>
               </div>
               <div className="mt-4 h-2 overflow-hidden rounded-full bg-white/10">
-                <div className="h-full rounded-full bg-amber-300" style={{ width: `${job.progress}%` }} />
+                <div className="h-full rounded-full bg-sky-300" style={{ width: `${job.progress}%` }} />
               </div>
               {job.errorMessage ? <p className="mt-3 text-sm text-rose-300">{job.errorMessage}</p> : null}
             </div>
@@ -657,7 +657,7 @@ function JobsView({ jobs, events }: { jobs: JobRecord[]; events: PipelineEvent[]
         </CardContent>
       </Card>
 
-      <Card className="border-white/10 bg-white/5 text-slate-100 shadow-none">
+      <Card className="border-white/10 bg-white/[0.04] text-slate-100 shadow-none">
         <CardHeader>
           <CardTitle>Pipeline Event Timeline</CardTitle>
           <CardDescription className="text-slate-400">Chronological stream of document and consolidation activity</CardDescription>
@@ -666,7 +666,7 @@ function JobsView({ jobs, events }: { jobs: JobRecord[]; events: PipelineEvent[]
           <ScrollArea className="h-[720px] pr-4">
             <div className="space-y-4">
               {events.map((event) => (
-                <div key={event.eventId} className="relative rounded-[28px] border border-white/10 bg-slate-950/50 p-4">
+                <div key={event.eventId} className="relative rounded-[16px] border border-white/10 bg-slate-950/50 p-4 transition-colors hover:border-white/16 hover:bg-slate-950/72">
                   <div className="mb-2 flex items-center gap-2 text-xs uppercase tracking-[0.24em] text-slate-500">
                     <Badge className="bg-white/10 text-slate-100">{event.stage}</Badge>
                     {event.level}

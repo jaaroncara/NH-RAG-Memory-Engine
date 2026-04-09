@@ -26,7 +26,7 @@ def health() -> dict[str, str]:
 @app.post("/parse")
 async def parse_document(file: UploadFile = File(...)) -> dict:
     if DocumentConverter is None:
-    raise HTTPException(status_code=500, detail=f"Docling import failed: {IMPORT_ERROR}")
+        raise HTTPException(status_code=500, detail=f"Docling import failed: {IMPORT_ERROR}")
 
     suffix = Path(file.filename or "document.bin").suffix or ".bin"
     content = await file.read()

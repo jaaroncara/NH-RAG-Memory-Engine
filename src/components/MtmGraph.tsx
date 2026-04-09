@@ -38,7 +38,7 @@ export default function MtmGraph({ graph }: MtmGraphProps) {
 
     const link = svg
       .append("g")
-      .attr("stroke", "rgba(233, 168, 120, 0.35)")
+      .attr("stroke", "rgba(125, 211, 252, 0.22)")
       .attr("stroke-width", 1)
       .selectAll("line")
       .data(links)
@@ -57,7 +57,7 @@ export default function MtmGraph({ graph }: MtmGraphProps) {
       .append("circle")
       .attr("r", (datum) => 12 + Math.max(0, (datum.pageRank ?? 0) * 16))
       .attr("fill", (datum) => color(String(datum.communityId ?? -1)))
-      .attr("stroke", "rgba(15, 23, 42, 0.7)")
+      .attr("stroke", "rgba(226, 232, 240, 0.28)")
       .attr("stroke-width", 1.5);
 
     node
@@ -90,11 +90,11 @@ export default function MtmGraph({ graph }: MtmGraphProps) {
 
   if (graph.nodes.length === 0) {
     return (
-      <div className="flex h-[420px] items-center justify-center rounded-3xl border border-white/10 bg-slate-950/70 text-sm text-slate-400">
+      <div className="flex h-[420px] items-center justify-center rounded-[18px] border border-white/10 bg-[#09111d]/80 text-sm text-slate-400">
         No MTM nodes available yet.
       </div>
     );
   }
 
-  return <svg ref={ref} className="h-[420px] w-full rounded-3xl border border-white/10 bg-slate-950/90" />;
+  return <svg ref={ref} className="h-[420px] w-full rounded-[18px] border border-white/10 bg-[#09111d]/90" />;
 }
