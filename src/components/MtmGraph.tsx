@@ -90,11 +90,11 @@ export default function MtmGraph({ graph }: MtmGraphProps) {
 
   if (graph.nodes.length === 0) {
     return (
-      <div className="flex h-[420px] items-center justify-center rounded-[18px] border border-white/10 bg-[#09111d]/80 text-sm text-slate-400">
+      <div className="flex h-[420px] items-center justify-center rounded-[18px] border border-white/10 bg-black/80 text-sm text-neutral-400">
         No MTM nodes available yet.
       </div>
     );
   }
 
-  return <svg ref={ref} className="h-[420px] w-full rounded-[18px] border border-white/10 bg-[#09111d]/90" />;
+  return <svg ref={ref} className="h-[420px] w-full rounded-[18px] border border-white/10 bg-black/90" />;
 }

@@ -158,7 +158,7 @@ export default function MemoryDashboard() {
                     animate={{ opacity: 1, y: 0 }}
                     className={`flex flex-col ${log.actor === Actor.USER ? 'items-end' : 'items-start'}`}
                   >
-                    <div className={`max-w-[80%] p-3 border border-ink ${log.actor === Actor.USER ? 'bg-ink text-bg' : 'bg-white'}`}>
+                    <div className={`max-w-[80%] p-3 border border-ink ${log.actor === Actor.USER ? 'bg-ink text-bg' : 'bg-transparent'}`}>
                       <p className="text-sm">{log.rawText}</p>
                       <div className="flex justify-between items-center mt-2 opacity-50 text-[10px] font-mono">
                         <span>{log.actor.toUpperCase()}</span>
@@ -175,7 +175,7 @@ export default function MemoryDashboard() {
                 )}
               </div>
             </ScrollArea>
-            <div className="p-4 border-t border-ink bg-white/50">
+            <div className="p-4 border-t border-ink bg-transparent/10">
               <form 
                 onSubmit={(e) => { e.preventDefault(); handleSend(); }}
                 className="flex gap-2"
@@ -213,7 +213,7 @@ export default function MemoryDashboard() {
                   <span className="text-xs font-mono uppercase">Edges (Similarity)</span>
                   <span className="font-mono font-bold">--</span>
                 </div>
-                <div className="p-3 bg-white border border-ink/20 text-[10px] font-mono leading-relaxed">
+                <div className="p-3 bg-transparent border border-ink/20 text-[10px] font-mono leading-relaxed">
                   <p className="opacity-60 italic">"MTM maps associative relationships using vector similarity edges. Nodes below the Salience Threshold are pruned during Sleep-Cycle."</p>
                 </div>
               </div>
@@ -237,7 +237,7 @@ export default function MemoryDashboard() {
                     </div>
                   ) : (
                     ltm.map((fact, i) => (
-                      <div key={i} className="p-2 border border-ink/20 bg-white text-xs">
+                      <div key={i} className="p-2 border border-ink/20 bg-transparent text-xs">
                         <p className="font-medium">{fact.distilledFact}</p>
                         <div className="flex justify-between items-center mt-2 text-[8px] font-mono opacity-50">
                           <span>PROVENANCE: {fact.provenance?.length || 0} NODES</span>
