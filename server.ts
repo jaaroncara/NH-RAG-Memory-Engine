@@ -1,9 +1,21 @@
+import "dotenv/config";
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
 import { fileURLToPath } from "url";
 import cors from "cors";
 import morgan from "morgan";
+
+import { pool } from "./src/server/db/index.js";
+import { initNeo4j, closeNeo4j } from "./src/server/db/neo4j.js";
+import { getStmCount } from "./src/server/services/stmService.js";
+import { getMtmCount } from "./src/server/services/mtmService.js";
+import { getLtmCount } from "./src/server/services/ltmService.js";
+
+import stmRoutes from "./src/server/routes/stm.js";
+import mtmRoutes from "./src/server/routes/mtm.js";
+import ltmRoutes from "./src/server/routes/ltm.js";
+import consolidationRoutes from "./src/server/routes/consolidation.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -16,24 +28,65 @@ async function startServer() {
   app.use(morgan("dev"));
   app.use(express.json());
 
+  // Initialize databases
+  try {
+    await pool.query("SELECT 1");
+    console.log("PostgreSQL connected");
+  } catch (err) {
+    console.error("PostgreSQL connection failed:", err);
+  }
+
+  try {
+    await initNeo4j();
+    console.log("Neo4j connected");
+  } catch (err) {
+    console.error("Neo4j connection failed:", err);
+  }
+
   // API routes
-  app.get("/api/health", (req, res) => {
-    res.json({ status: "ok", message: "NH-RAG Memory Engine is running" });
+  app.use("/api/stm", stmRoutes);
+  app.use("/api/mtm", mtmRoutes);
+  app.use("/api/ltm", ltmRoutes);
+  app.use("/api/consolidation", consolidationRoutes);
+
+  app.get("/api/health", async (req, res) => {
+    const health: Record<string, string> = {};
+    try {
+      await pool.query("SELECT 1");
+      health.postgres = "ok";
+    } catch {
+      health.postgres = "error";
+    }
+    try {
+      const { getNeo4jDriver } = await import("./src/server/db/neo4j.js");
+      const s = getNeo4jDriver().session();
+      await s.run("RETURN 1");
+      await s.close();
+      health.neo4j = "ok";
+    } catch {
+      health.neo4j = "error";
+    }
+    res.json({ status: "ok", services: health });
   });
 
-  // Placeholder for RESTful CRUD operations as requested
-  // These will interact with Firestore via the client-side or admin SDK
-  // For simplicity and security (as per guidelines), we'll keep most logic in the frontend
-  // but provide these endpoints for external integration if needed.
-
-  app.get("/api/memory/stats", (req, res) => {
-    res.json({
-      tiers: {
-        stm: { status: "active", type: "SQL-like (Firestore)" },
-        mtm: { status: "active", type: "Graph (Firestore + Graphology)" },
-        ltm: { status: "active", type: "Vector (Firestore + Embeddings)" }
-      }
-    });
+  app.get("/api/memory/stats", async (req, res) => {
+    try {
+      const [stm, mtm, ltm] = await Promise.all([
+        getStmCount(),
+        getMtmCount(),
+        getLtmCount(),
+      ]);
+      res.json({
+        tiers: {
+          stm: { count: stm, type: "PostgreSQL (Relational)" },
+          mtm: { count: mtm, type: "Neo4j (Graph + GDS)" },
+          ltm: { count: ltm, type: "PostgreSQL (pgvector)" },
+        },
+      });
+    } catch (error) {
+      console.error("Stats error:", error);
+      res.status(500).json({ error: "Failed to retrieve stats" });
+    }
   });
 
   // Vite middleware for development
@@ -51,9 +104,20 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, "0.0.0.0", () => {
+  const server = app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
+
+  // Graceful shutdown
+  const shutdown = async () => {
+    console.log("\nShutting down...");
+    server.close();
+    await pool.end();
+    await closeNeo4j();
+    process.exit(0);
+  };
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 }
 
 startServer();

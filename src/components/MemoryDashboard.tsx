@@ -49,9 +49,12 @@ export default function MemoryDashboard() {
   }, [stm]);
 
   const loadStats = async () => {
-    // In a real app, we'd query collection counts
-    // For now, we'll just simulate or fetch a few
-    setStats({ stm: stm.length, mtm: 0, ltm: ltm.length });
+    try {
+      const s = await MemoryService.getStats();
+      setStats(s);
+    } catch {
+      // stats unavailable — leave defaults
+    }
   };
 
   const loadSTM = async () => {

@@ -1,0 +1,46 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: nhrag-postgres
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: nhrag
+      POSTGRES_PASSWORD: nhrag_dev
+      POSTGRES_DB: nhrag
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init-postgres.sql:/docker-entrypoint-initdb.d/01-init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nhrag"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  neo4j:
+    image: neo4j:5-enterprise
+    container_name: nhrag-neo4j
+    restart: unless-stopped
+    ports:
+      - "7474:7474"
+      - "7687:7687"
+    environment:
+      NEO4J_AUTH: neo4j/nhrag_dev_password
+      NEO4J_ACCEPT_LICENSE_AGREEMENT: "yes"
+      NEO4J_PLUGINS: '["graph-data-science"]'
+    volumes:
+      - neo4jdata:/data
+      - neo4jplugins:/plugins
+    healthcheck:
+      test: ["CMD", "neo4j", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  pgdata:
+  neo4jdata:
+  neo4jplugins:
