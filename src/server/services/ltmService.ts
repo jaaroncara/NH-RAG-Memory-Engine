@@ -1,6 +1,6 @@
 import { db } from "../db/index.js";
 import { longTermMemory } from "../db/schema.js";
-import { sql } from "drizzle-orm";
+import { desc, sql } from "drizzle-orm";
 import { getProvider } from "../providers/index.js";
 
 export interface SemanticFact {
@@ -10,6 +10,12 @@ export interface SemanticFact {
   lastAccessed: string;
   provenance: string[];
   score?: number;
+  metadata?: Record<string, unknown>;
+}
+
+export interface LtmExplorerResult {
+  facts: SemanticFact[];
+  total: number;
 }
 
 export async function searchLTM(
@@ -45,13 +51,44 @@ export async function searchLTM(
 export async function storeFact(
   distilledFact: string,
   embedding: number[],
-  provenance: string[]
+  provenance: string[],
+  metadata?: Record<string, unknown>
 ): Promise<string> {
   const [row] = await db
     .insert(longTermMemory)
-    .values({ distilledFact, embedding, provenance })
+    .values({ distilledFact, embedding, provenance, metadata: metadata ?? {} })
     .returning({ id: longTermMemory.knowledgeId });
   return row.id;
+}
+
+export async function listLtmFacts(options?: {
+  page?: number;
+  pageSize?: number;
+}): Promise<LtmExplorerResult> {
+  const page = Math.max(options?.page ?? 1, 1);
+  const pageSize = Math.min(Math.max(options?.pageSize ?? 20, 1), 100);
+  const rows = await db
+    .select()
+    .from(longTermMemory)
+    .orderBy(desc(longTermMemory.lastAccessed))
+    .limit(pageSize)
+    .offset((page - 1) * pageSize);
+
+  const [totalRow] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(longTermMemory);
+
+  return {
+    facts: rows.map((row) => ({
+      knowledgeId: row.knowledgeId,
+      distilledFact: row.distilledFact,
+      embedding: [],
+      lastAccessed: row.lastAccessed.toISOString(),
+      provenance: row.provenance ?? [],
+      metadata: row.metadata as Record<string, unknown>,
+    })),
+    total: totalRow.count,
+  };
 }
 
 export async function getLtmCount(): Promise<number> {

@@ -1,8 +1,8 @@
 import { db } from "../db/index.js";
 import { shortTermMemory } from "../db/schema.js";
-import { eq, desc, sql } from "drizzle-orm";
+import { and, desc, eq, ilike, sql } from "drizzle-orm";
 
-export type Actor = "user" | "agent" | "system";
+export type Actor = "user" | "agent" | "system" | "document";
 
 export interface EpisodicMemory {
   interactionId: string;
@@ -10,18 +10,77 @@ export interface EpisodicMemory {
   timestamp: string;
   actor: Actor;
   rawText: string;
+  sourceType?: string;
+  documentId?: string | null;
+  chunkId?: string | null;
+  metadata?: Record<string, unknown>;
+}
+
+export interface StmExplorerResult {
+  entries: EpisodicMemory[];
+  total: number;
 }
 
 export async function addEpisodicLog(
   sessionId: string,
   actor: Actor,
-  rawText: string
+  rawText: string,
+  options?: {
+    sourceType?: string;
+    documentId?: string;
+    chunkId?: string;
+    metadata?: Record<string, unknown>;
+  }
 ): Promise<string> {
   const [row] = await db
     .insert(shortTermMemory)
-    .values({ sessionId, actor, rawText })
+    .values({
+      sessionId,
+      actor,
+      rawText,
+      sourceType: options?.sourceType ?? "conversation",
+      documentId: options?.documentId,
+      chunkId: options?.chunkId,
+      metadata: options?.metadata ?? {},
+    })
     .returning({ id: shortTermMemory.interactionId });
   return row.id;
+}
+
+export async function addDocumentChunksToSTM(
+  documentId: string,
+  chunks: Array<{
+    chunkId: string;
+    contentText: string;
+    sectionLabel?: string | null;
+    pageRange?: string | null;
+    tokenEstimate?: number;
+  }>
+): Promise<string[]> {
+  if (chunks.length === 0) {
+    return [];
+  }
+
+  const rows = await db
+    .insert(shortTermMemory)
+    .values(
+      chunks.map((chunk) => ({
+        sessionId: `document:${documentId}`,
+        actor: "document" as const,
+        rawText: chunk.contentText.slice(0, 5120),
+        sourceType: "docling_import",
+        documentId,
+        chunkId: chunk.chunkId,
+        metadata: {
+          sectionLabel: chunk.sectionLabel ?? null,
+          pageRange: chunk.pageRange ?? null,
+          tokenEstimate: chunk.tokenEstimate ?? 0,
+        },
+      }))
+    )
+    .returning({ id: shortTermMemory.interactionId });
+
+  return rows.map((row) => row.id);
 }
 
 export async function getRecentContext(
@@ -42,8 +101,63 @@ export async function getRecentContext(
       timestamp: r.timestamp.toISOString(),
       actor: r.actor as Actor,
       rawText: r.rawText,
+      sourceType: r.sourceType,
+      documentId: r.documentId,
+      chunkId: r.chunkId,
+      metadata: r.metadata as Record<string, unknown>,
     }))
     .reverse();
+}
+
+export async function listStmEntries(options?: {
+  page?: number;
+  pageSize?: number;
+  actor?: Actor;
+  documentId?: string;
+  query?: string;
+}): Promise<StmExplorerResult> {
+  const page = Math.max(options?.page ?? 1, 1);
+  const pageSize = Math.min(Math.max(options?.pageSize ?? 20, 1), 100);
+  const filters = [];
+
+  if (options?.actor) {
+    filters.push(eq(shortTermMemory.actor, options.actor));
+  }
+  if (options?.documentId) {
+    filters.push(eq(shortTermMemory.documentId, options.documentId));
+  }
+  if (options?.query) {
+    filters.push(ilike(shortTermMemory.rawText, `%${options.query}%`));
+  }
+
+  const whereClause = filters.length > 0 ? and(...filters) : undefined;
+  const entries = await db
+    .select()
+    .from(shortTermMemory)
+    .where(whereClause)
+    .orderBy(desc(shortTermMemory.timestamp))
+    .limit(pageSize)
+    .offset((page - 1) * pageSize);
+
+  const [totalRow] = await db
+    .select({ count: sql<number>`count(*)::int` })
+    .from(shortTermMemory)
+    .where(whereClause);
+
+  return {
+    entries: entries.map((entry) => ({
+      interactionId: entry.interactionId,
+      sessionId: entry.sessionId,
+      timestamp: entry.timestamp.toISOString(),
+      actor: entry.actor as Actor,
+      rawText: entry.rawText,
+      sourceType: entry.sourceType,
+      documentId: entry.documentId,
+      chunkId: entry.chunkId,
+      metadata: entry.metadata as Record<string, unknown>,
+    })),
+    total: totalRow.count,
+  };
 }
 
 export async function getStmCount(): Promise<number> {

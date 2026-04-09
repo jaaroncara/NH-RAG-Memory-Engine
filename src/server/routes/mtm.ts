@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
-import { consolidateToMTM } from "../services/mtmService.js";
+import { consolidateToMTM, getGraphSnapshot } from "../services/mtmService.js";
 
 const router = Router();
 
@@ -21,6 +21,17 @@ router.post("/consolidate", async (req, res) => {
     }
     console.error("MTM consolidate error:", error);
     res.status(500).json({ error: "Failed to consolidate to MTM" });
+  }
+});
+
+router.get("/graph", async (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 40, 120);
+    const graph = await getGraphSnapshot(limit);
+    res.json(graph);
+  } catch (error) {
+    console.error("MTM graph error:", error);
+    res.status(500).json({ error: "Failed to load MTM graph" });
   }
 });
 

@@ -131,7 +131,7 @@ User Input
    ```bash
    docker-compose up -d
    ```
-   This launches PostgreSQL 16 (with pgvector) on port 5432 and Neo4j 5 Enterprise (with GDS) on ports 7474/7687.
+   This launches PostgreSQL 16 (with pgvector) on port 5432, Neo4j 5 Enterprise (with GDS) on ports 7474/7687, and a Docling sidecar on port 8081 for document parsing.
 
 2. **Configure environment:**
    ```bash
@@ -150,6 +150,18 @@ User Input
    ```
    Opens at [http://localhost:3000](http://localhost:3000).
 
+## Operator Console
+
+The frontend now behaves as a database-oriented control plane rather than a message composer. The primary surfaces are:
+
+- **Documents:** upload one or more files, inspect chunk extraction, and trace import events.
+- **STM:** paginated PostgreSQL view of raw episodic rows, including document-derived chunks.
+- **MTM Graph:** Neo4j subgraph explorer for recent episodic nodes and similarity edges.
+- **LTM:** pgvector-backed distilled fact store.
+- **Jobs:** ingestion and sleep-cycle execution timeline.
+
+If the Docling sidecar is not running, plain-text and Markdown files still import via a local fallback parser, but richer formats require Docling.
+
 ---
 
 ## API Endpoints
@@ -158,9 +170,18 @@ User Input
 |--------|-------|-------------|
 | `POST` | `/api/stm/log` | Write a raw episodic turn to the STM |
 | `GET` | `/api/stm/context/:sessionId` | Fetch recent verbatim context for a session |
+| `GET` | `/api/stm/entries` | Paginated STM table explorer |
+| `GET` | `/api/documents` | List imported documents |
+| `POST` | `/api/documents/import` | Upload and ingest one or more documents through Docling |
+| `GET` | `/api/documents/:documentId` | Get chunk detail and event lineage for a document |
 | `POST` | `/api/mtm/consolidate` | Embed an interaction and add it as a node in the MTM graph |
+| `GET` | `/api/mtm/graph` | Fetch a bounded Neo4j subgraph snapshot for visualization |
 | `POST` | `/api/consolidation/sleep-cycle` | Run the full sleep-cycle: PageRank pruning → Louvain clustering → LLM distillation → LTM storage |
 | `GET` | `/api/ltm/search?q=...` | ANN cosine search over distilled long-term facts |
+| `GET` | `/api/ltm/facts` | Paginated LTM fact explorer |
+| `GET` | `/api/jobs` | List ingestion and consolidation jobs |
+| `GET` | `/api/jobs/events` | List pipeline events across jobs/documents |
+| `GET` | `/api/metrics/overview` | Operator dashboard metrics and recent activity |
 | `GET` | `/api/memory/stats` | Row/node counts across all three memory tiers |
 | `GET` | `/api/health` | Database connectivity health check |
 

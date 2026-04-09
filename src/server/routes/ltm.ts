@@ -1,7 +1,19 @@
 import { Router } from "express";
-import { searchLTM } from "../services/ltmService.js";
+import { listLtmFacts, searchLTM } from "../services/ltmService.js";
 
 const router = Router();
+
+router.get("/facts", async (req, res) => {
+  try {
+    const page = Number(req.query.page) || 1;
+    const pageSize = Number(req.query.pageSize) || 20;
+    const facts = await listLtmFacts({ page, pageSize });
+    res.json(facts);
+  } catch (error) {
+    console.error("LTM explorer error:", error);
+    res.status(500).json({ error: "Failed to retrieve LTM facts" });
+  }
+});
 
 router.get("/search", async (req, res) => {
   try {
