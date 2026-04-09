@@ -1,0 +1,115 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: stm
+    // Document ID: interactionId
+    // Fields:
+    //   - interactionId: string (required)
+    //   - sessionId: string (required)
+    //   - timestamp: string (required, ISO 8601)
+    //   - actor: string (required, ['user', 'agent', 'system'])
+    //   - rawText: string (required, max 5000 chars)
+    //
+    // Collection: mtm
+    // Document ID: nodeId
+    // Fields:
+    //   - nodeId: string (required)
+    //   - type: string (required, ['episodic', 'semantic'])
+    //   - content: string (required, max 5000 chars)
+    //   - embedding: list (required, numbers)
+    //   - metadata: map (optional)
+    //   - pageRank: number (optional)
+    //   - communityId: string (optional)
+    //
+    // Collection: ltm
+    // Document ID: knowledgeId
+    // Fields:
+    //   - knowledgeId: string (required)
+    //   - distilledFact: string (required, max 2000 chars)
+    //   - embedding: list (required, numbers)
+    //   - lastAccessed: string (required, ISO 8601)
+    //   - provenance: list (optional, strings)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isValidDateString(dateStr) {
+      return dateStr is string &&
+        dateStr.matches("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}.*Z?$");
+    }
+
+    function isValidActor(actor) {
+      return actor in ['user', 'agent', 'system'];
+    }
+
+    function isValidNodeType(type) {
+      return type in ['episodic', 'semantic'];
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidSTM(data) {
+      return data.keys().hasAll(['interactionId', 'sessionId', 'timestamp', 'actor', 'rawText']) &&
+             data.interactionId is string &&
+             data.sessionId is string &&
+             isValidDateString(data.timestamp) &&
+             isValidActor(data.actor) &&
+             data.rawText is string && data.rawText.size() <= 5000;
+    }
+
+    function isValidMTM(data) {
+      return data.keys().hasAll(['nodeId', 'type', 'content', 'embedding']) &&
+             data.nodeId is string &&
+             isValidNodeType(data.type) &&
+             data.content is string && data.content.size() <= 5000 &&
+             data.embedding is list;
+    }
+
+    function isValidLTM(data) {
+      return data.keys().hasAll(['knowledgeId', 'distilledFact', 'embedding', 'lastAccessed']) &&
+             data.knowledgeId is string &&
+             data.distilledFact is string && data.distilledFact.size() <= 2000 &&
+             data.embedding is list &&
+             isValidDateString(data.lastAccessed);
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /stm/{interactionId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidSTM(request.resource.data);
+      allow update: if isAuthenticated() && isValidSTM(request.resource.data);
+      allow delete: if isAuthenticated();
+    }
+
+    match /mtm/{nodeId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidMTM(request.resource.data);
+      allow update: if isAuthenticated() && isValidMTM(request.resource.data);
+      allow delete: if isAuthenticated();
+    }
+
+    match /ltm/{knowledgeId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && isValidLTM(request.resource.data);
+      allow update: if isAuthenticated() && isValidLTM(request.resource.data);
+      allow delete: if isAuthenticated();
+    }
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "name": "NH-RAG Memory Engine",
+  "description": "A biomimetic agentic memory system implementing Short-Term (SQL), Medium-Term (Graph), and Long-Term (Vector) storage tiers with algorithmic forgetting and sleep-cycle consolidation.",
+  "requestFramePermissions": []
+}
