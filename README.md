@@ -144,11 +144,102 @@ User Input
    npm install
    ```
 
-4. **Run the app:**
+4. **Run the Postgres migration against your current database:**
+   ```bash
+   npm run db:migrate
+   ```
+   This applies tracked SQL migrations from `db/migrations` and is the correct way to upgrade an existing local Postgres volume with the new document/job/event tables.
+
+5. **Run the app:**
    ```bash
    npm run dev
    ```
-   Opens at [http://localhost:3000](http://localhost:3000).
+   Opens at [http://localhost:3000](http://localhost:3000). This single process hosts both the Express backend and the Vite-powered frontend.
+
+## Starting Services
+
+### 1. Infrastructure services
+
+Start PostgreSQL, Neo4j, and the Docling sidecar:
+
+```bash
+docker compose up -d postgres neo4j docling
+```
+
+If you prefer to start everything defined in Compose:
+
+```bash
+docker compose up -d
+```
+
+### 2. Application service
+
+Start the combined backend and frontend dev server:
+
+```bash
+npm run dev
+```
+
+This project does **not** run separate frontend and backend dev commands right now. `npm run dev` starts the Express server in [server.ts](server.ts), and that server mounts Vite middleware so the React frontend is served from the same process on port `3000`.
+
+### 3. Optional migration step for existing databases
+
+If your Postgres volume already existed before the operator-console changes, run:
+
+```bash
+npm run db:migrate
+```
+
+You only need to run it again when new SQL files are added under `db/migrations`.
+
+## Recommended Local Startup Order
+
+1. Copy the environment file:
+   ```bash
+   cp .env.example .env.local
+   ```
+
+2. Edit `.env.local` and set the provider credentials you actually use:
+   - `GEMINI_API_KEY` if `EMBEDDING_PROVIDER=gemini`
+   - `OPENAI_API_KEY` if `EMBEDDING_PROVIDER=openai`
+
+3. Start infrastructure:
+   ```bash
+   docker compose up -d postgres neo4j docling
+   ```
+
+4. Install Node dependencies:
+   ```bash
+   npm install
+   ```
+
+5. Run the database migration:
+   ```bash
+   npm run db:migrate
+   ```
+
+6. Start the app server and frontend:
+   ```bash
+   npm run dev
+   ```
+
+7. Open the operator console:
+   ```text
+   http://localhost:3000
+   ```
+
+## Verifying That Everything Is Running
+
+- Backend + frontend: open `http://localhost:3000`
+- Health endpoint: open `http://localhost:3000/api/health`
+- Docling sidecar: open `http://localhost:8081/health`
+- Neo4j Browser: open `http://localhost:7474`
+
+If `npm run db:migrate` fails, verify that:
+
+- PostgreSQL is reachable on the `DATABASE_URL` in `.env.local`
+- the `vector` extension exists in your Postgres container
+- you are running the command from the project root
 
 ## Operator Console
 

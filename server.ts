@@ -1,4 +1,4 @@
-import "dotenv/config";
+import dotenv from "dotenv";
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import path from "path";
@@ -22,6 +22,9 @@ import metricsRoutes from "./src/server/routes/metrics.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+dotenv.config({ path: path.resolve(process.cwd(), ".env.local") });
+dotenv.config();
 
 async function startServer() {
   const app = express();
