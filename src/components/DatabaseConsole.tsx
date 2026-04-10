@@ -597,9 +597,9 @@ function MtmView({ graph }: { graph: GraphSnapshot }) {
       <Card className="border-white/10 bg-white/[0.04] text-neutral-100 shadow-none">
         <CardHeader>
           <CardTitle>Medium-Term Memory Network</CardTitle>
-          <CardDescription className="text-neutral-400">A bounded subgraph of the latest episodic nodes with similarity edges and community coloring.</CardDescription>
+          <CardDescription className="text-neutral-400">A bounded subgraph of the latest episodic nodes with similarity edges and community coloring. The graph can be panned, zoomed, and expanded into fullscreen for inspection.</CardDescription>
         </CardHeader>
-        <CardContent>
+        <CardContent className="pt-0">
           <MtmGraph graph={graph} />
         </CardContent>
       </Card>
