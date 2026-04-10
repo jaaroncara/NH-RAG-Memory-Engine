@@ -1,10 +1,39 @@
 import { getNeo4jDriver } from "../db/neo4j.js";
 import { getProvider } from "../providers/index.js";
+import { SEMANTIC_RELATIONSHIP_TYPES } from "./entityExtractionService.js";
 import { storeFact } from "./ltmService.js";
 import { createJob, markJobCompleted, markJobFailed, markJobRunning, recordPipelineEvent } from "./jobService.js";
 
 const SALIENCE_PERCENTILE = 25;
 const MIN_COMMUNITY_SIZE = 3;
+const SLEEP_CYCLE_NODE_LABELS = ["EpisodicNode", "SemanticNode"];
+const SLEEP_CYCLE_RELATIONSHIP_PROJECTION = Object.fromEntries(
+  ["SIMILAR_TO", ...SEMANTIC_RELATIONSHIP_TYPES].map((relationshipType) => [
+    relationshipType,
+    { orientation: "UNDIRECTED", properties: ["weight"] },
+  ])
+);
+
+interface PageRankScore {
+  graphNodeId: string;
+  nodeType: string;
+  score: number;
+}
+
+interface SemanticCommunityEntity {
+  entityId: string;
+  entityType: string;
+  canonicalName: string;
+  mentionCount: number;
+}
+
+interface SemanticCommunityRelation {
+  relationshipType: string;
+  entityType: string;
+  canonicalName: string;
+  confidence: number;
+  relationshipHint?: string | null;
+}
 
 export async function runSleepCycle(): Promise<{
   pruned: number;
@@ -47,12 +76,12 @@ export async function runSleepCycle(): Promise<{
     const graphName = `nhrag_sleep_${Date.now()}`;
 
     await session.run(
-      `CALL gds.graph.project(
-        $graphName,
-        'EpisodicNode',
-        { SIMILAR_TO: { orientation: 'UNDIRECTED', properties: ['weight'] } }
-      )`,
-      { graphName }
+      `CALL gds.graph.project($graphName, $nodeLabels, $relationshipProjection)`,
+      {
+        graphName,
+        nodeLabels: SLEEP_CYCLE_NODE_LABELS,
+        relationshipProjection: SLEEP_CYCLE_RELATIONSHIP_PROJECTION,
+      }
     );
     await markJobRunning(jobId, "rank_nodes", 25);
 
@@ -65,15 +94,22 @@ export async function runSleepCycle(): Promise<{
         dampingFactor: 0.85
       })
       YIELD nodeId, score
-      RETURN gds.util.asNode(nodeId).nodeId AS nid, score
+      RETURN coalesce(gds.util.asNode(nodeId).nodeId, gds.util.asNode(nodeId).entityId) AS graphNodeId,
+             coalesce(gds.util.asNode(nodeId).type, '') AS nodeType,
+             score
       ORDER BY score ASC`,
       { graphName }
     );
 
-    const scores = prResult.records.map((r) => ({
-      nid: r.get("nid") as string,
-      score: r.get("score") as number,
+    const scores: PageRankScore[] = prResult.records.map((r) => ({
+      graphNodeId: String(r.get("graphNodeId") ?? ""),
+      nodeType: String(r.get("nodeType") ?? ""),
+      score: Number(r.get("score") ?? 0),
     }));
+    const episodicScores = scores.filter(
+      (score) => score.nodeType === "episodic" && score.graphNodeId.length > 0
+    );
+    const semanticScoreCount = scores.filter((score) => score.nodeType === "semantic").length;
 
     // Write PageRank back to nodes for reference
     await session.run(
@@ -86,20 +122,22 @@ export async function runSleepCycle(): Promise<{
     );
 
     // Calculate pruning threshold (bottom 25th percentile)
-    const sorted = scores.map((s) => s.score).sort((a, b) => a - b);
+    const sorted = episodicScores.map((s) => s.score).sort((a, b) => a - b);
     const thresholdIdx = Math.floor(
       (SALIENCE_PERCENTILE / 100) * sorted.length
     );
     const threshold = sorted[thresholdIdx] ?? 0;
-    const nodesToPrune = scores
+    const nodesToPrune = episodicScores
       .filter((s) => s.score < threshold)
-      .map((s) => s.nid);
+      .map((s) => s.graphNodeId);
     await recordPipelineEvent({
       jobId,
       stage: "rank_nodes",
       message: "Calculated PageRank scores",
       payload: {
         nodeCount,
+        episodicNodeCount: episodicScores.length,
+        semanticNodeCount: semanticScoreCount,
         threshold,
         nodesToPrune: nodesToPrune.length,
       },
@@ -133,20 +171,56 @@ export async function runSleepCycle(): Promise<{
     await markJobRunning(jobId, "distill_facts", 70);
 
     for (const record of commResult.records) {
+      const communityId = record.get("cid");
       const nodeIds = record.get("nodeIds") as string[];
       const contents = record.get("contents") as string[];
 
       if (nodeIds.length < MIN_COMMUNITY_SIZE) continue;
 
-      const communityContent = contents.join("\n");
+      const semanticContextResult = await session.run(
+        `MATCH (e:EpisodicNode)-[r]->(s:SemanticNode)
+         WHERE e.communityId = $communityId AND NOT e.nodeId IN $pruned
+         RETURN collect(DISTINCT {
+                  entityId: s.entityId,
+                  entityType: s.entityType,
+                  canonicalName: s.canonicalName,
+                  mentionCount: coalesce(s.mentionCount, 0)
+                }) AS semanticEntities,
+                collect(DISTINCT {
+                  relationshipType: type(r),
+                  entityType: s.entityType,
+                  canonicalName: s.canonicalName,
+                  confidence: coalesce(r.confidence, 0.0),
+                  relationshipHint: r.relationshipHint
+                }) AS semanticRelations`,
+        { communityId, pruned: nodesToPrune }
+      );
+      const semanticContext = semanticContextResult.records[0];
+      const semanticEntities = ((semanticContext?.get("semanticEntities") as SemanticCommunityEntity[] | null) ?? [])
+        .filter((entity): entity is SemanticCommunityEntity => Boolean(entity?.entityId && entity?.canonicalName));
+      const semanticRelations = ((semanticContext?.get("semanticRelations") as SemanticCommunityRelation[] | null) ?? [])
+        .filter((relation): relation is SemanticCommunityRelation => Boolean(relation?.relationshipType && relation?.canonicalName));
+
       const distilledFact = await provider.generate(
-        `Synthesize the following episodic memories into a single, dense, generalized semantic fact. Strip away specific dates and verbatim quotes. Focus on the underlying truth or user preference.\n\nMemories:\n${communityContent}`
+        buildDistillationPrompt(contents, semanticEntities, semanticRelations)
       );
 
       if (distilledFact) {
         const embedding = await provider.embed(distilledFact);
         await storeFact(distilledFact, embedding, nodeIds, {
+          communityId: normalizeNeo4jNumber(communityId),
           communitySize: nodeIds.length,
+          semanticEntityCount: semanticEntities.length,
+          semanticRelationCount: semanticRelations.length,
+          semanticAnchors: semanticEntities
+            .slice()
+            .sort((left, right) => right.mentionCount - left.mentionCount)
+            .slice(0, 12)
+            .map(({ canonicalName, entityType, mentionCount }) => ({
+              canonicalName,
+              entityType,
+              mentionCount,
+            })),
         });
         consolidatedCount++;
       }
@@ -161,6 +235,11 @@ export async function runSleepCycle(): Promise<{
         { ids: nodesToPrune }
       );
     }
+    await session.run(
+      `MATCH (s:SemanticNode)
+       WHERE NOT (:EpisodicNode)--(s)
+       DETACH DELETE s`
+    );
     await markJobRunning(jobId, "cleanup", 95);
 
     // ------------------------------------------------------------------
@@ -195,4 +274,99 @@ export async function runSleepCycle(): Promise<{
   } finally {
     await session.close();
   }
+}
+
+function buildDistillationPrompt(
+  contents: string[],
+  semanticEntities: SemanticCommunityEntity[],
+  semanticRelations: SemanticCommunityRelation[]
+) {
+  const episodicSection = contents.join("\n");
+  const semanticEntitySection = formatSemanticEntities(semanticEntities);
+  const semanticRelationSection = formatSemanticRelations(semanticRelations);
+
+  return [
+    "Synthesize the following episodic memories into a single, dense, generalized semantic fact.",
+    "Strip away specific dates and verbatim quotes. Focus on the underlying truth, preference, or durable state.",
+    "Use the semantic anchors and entity relations to resolve recurring people, places, projects, tools, and topics.",
+    "Do not invent facts that are not supported by the memories or semantic anchors.",
+    "",
+    "Episodic memories:",
+    episodicSection,
+    "",
+    "Semantic anchors:",
+    semanticEntitySection,
+    "",
+    "Entity relations:",
+    semanticRelationSection,
+  ].join("\n");
+}
+
+function formatSemanticEntities(semanticEntities: SemanticCommunityEntity[]) {
+  if (semanticEntities.length === 0) {
+    return "- none";
+  }
+
+  return semanticEntities
+    .slice()
+    .sort((left, right) => {
+      if (right.mentionCount !== left.mentionCount) {
+        return right.mentionCount - left.mentionCount;
+      }
+
+      return left.canonicalName.localeCompare(right.canonicalName);
+    })
+    .slice(0, 16)
+    .map(
+      (entity) =>
+        `- [${entity.entityType}] ${entity.canonicalName}${
+          entity.mentionCount > 0 ? ` (mentions: ${entity.mentionCount})` : ""
+        }`
+    )
+    .join("\n");
+}
+
+function formatSemanticRelations(semanticRelations: SemanticCommunityRelation[]) {
+  if (semanticRelations.length === 0) {
+    return "- none";
+  }
+
+  return semanticRelations
+    .slice()
+    .sort((left, right) => {
+      if (right.confidence !== left.confidence) {
+        return right.confidence - left.confidence;
+      }
+
+      return left.relationshipType.localeCompare(right.relationshipType);
+    })
+    .slice(0, 24)
+    .map(
+      (relation) =>
+        `- ${relation.relationshipType} -> ${relation.canonicalName} [${relation.entityType}]${
+          relation.relationshipHint ? ` | ${relation.relationshipHint}` : ""
+        }`
+    )
+    .join("\n");
+}
+
+function normalizeNeo4jNumber(value: unknown) {
+  if (typeof value === "number") {
+    return value;
+  }
+
+  if (typeof value === "bigint") {
+    return Number(value);
+  }
+
+  if (
+    value &&
+    typeof value === "object" &&
+    "toNumber" in value &&
+    typeof (value as { toNumber: () => number }).toNumber === "function"
+  ) {
+    return (value as { toNumber: () => number }).toNumber();
+  }
+
+  return Number(value ?? 0);
 }

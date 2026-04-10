@@ -29,17 +29,20 @@ const rawExtractionSchema = z.object({
 
 export type SemanticEntityType = z.infer<typeof semanticEntityTypeSchema>;
 
-export type SemanticRelationshipType =
-  | "MENTIONS_PERSON"
-  | "MENTIONS_LOCATION"
-  | "LOCATED_IN"
-  | "REFERENCES_PROJECT"
-  | "WORKS_ON_PROJECT"
-  | "USES_TOOL"
-  | "MENTIONS_TOOL"
-  | "HAS_TOPIC"
-  | "MENTIONS_TOPIC"
-  | "RELATED_TO_ENTITY";
+export const SEMANTIC_RELATIONSHIP_TYPES = [
+  "MENTIONS_PERSON",
+  "MENTIONS_LOCATION",
+  "LOCATED_IN",
+  "REFERENCES_PROJECT",
+  "WORKS_ON_PROJECT",
+  "USES_TOOL",
+  "MENTIONS_TOOL",
+  "HAS_TOPIC",
+  "MENTIONS_TOPIC",
+  "RELATED_TO_ENTITY",
+] as const;
+
+export type SemanticRelationshipType = (typeof SEMANTIC_RELATIONSHIP_TYPES)[number];
 
 export interface ExtractedEntity {
   entityId: string;
@@ -226,20 +229,7 @@ function normalizeRelationshipToken(value: string | null | undefined): SemanticR
     return null;
   }
 
-  const relationships: readonly SemanticRelationshipType[] = [
-    "MENTIONS_PERSON",
-    "MENTIONS_LOCATION",
-    "LOCATED_IN",
-    "REFERENCES_PROJECT",
-    "WORKS_ON_PROJECT",
-    "USES_TOOL",
-    "MENTIONS_TOOL",
-    "HAS_TOPIC",
-    "MENTIONS_TOPIC",
-    "RELATED_TO_ENTITY",
-  ];
-
-  return relationships.includes(normalized as SemanticRelationshipType)
+  return SEMANTIC_RELATIONSHIP_TYPES.includes(normalized as SemanticRelationshipType)
     ? (normalized as SemanticRelationshipType)
     : null;
 }
