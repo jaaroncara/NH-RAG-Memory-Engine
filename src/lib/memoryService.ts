@@ -96,19 +96,41 @@ export interface GraphSnapshot {
     nodeId: string;
     type: "episodic" | "semantic";
     content: string;
+    displayLabel: string;
     consolidatedAt: string;
     pageRank?: number;
     communityId?: number;
+    entityType?: "person" | "location" | "project" | "tool" | "topic";
+    aliases?: string[];
+    mentionCount?: number;
   }>;
   edges: Array<{
     source: string;
     target: string;
     weight: number;
+    type:
+      | "SIMILAR_TO"
+      | "MENTIONS_PERSON"
+      | "MENTIONS_LOCATION"
+      | "LOCATED_IN"
+      | "REFERENCES_PROJECT"
+      | "WORKS_ON_PROJECT"
+      | "USES_TOOL"
+      | "MENTIONS_TOOL"
+      | "HAS_TOPIC"
+      | "MENTIONS_TOPIC"
+      | "RELATED_TO_ENTITY";
+    confidence?: number;
+    relationshipHint?: string;
   }>;
   stats: {
     nodeCount: number;
     edgeCount: number;
     communityCount: number;
+    episodicNodeCount: number;
+    semanticNodeCount: number;
+    similarityEdgeCount: number;
+    semanticEdgeCount: number;
   };
 }
 

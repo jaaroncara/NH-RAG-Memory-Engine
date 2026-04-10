@@ -8,3 +8,7 @@
 // Uniqueness constraint on SemanticNode
 // CREATE CONSTRAINT semantic_node_id IF NOT EXISTS
 //   FOR (n:SemanticNode) REQUIRE n.entityId IS UNIQUE;
+
+// Lookup index for canonical SemanticNode merges
+// CREATE INDEX semantic_node_lookup IF NOT EXISTS
+//   FOR (n:SemanticNode) ON (n.entityType, n.canonicalKey);

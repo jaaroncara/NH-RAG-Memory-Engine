@@ -6,7 +6,12 @@ import type { GraphSnapshot } from "../lib/memoryService";
 
 type RenderNode = GraphSnapshot["nodes"][number] & d3.SimulationNodeDatum;
 type RenderLink = GraphSnapshot["edges"][number] & d3.SimulationLinkDatum<RenderNode>;
-type InspectorNeighbor = GraphSnapshot["nodes"][number] & { weight: number };
+type InspectorNeighbor = GraphSnapshot["nodes"][number] & {
+  weight: number;
+  edgeType: GraphSnapshot["edges"][number]["type"];
+  confidence?: number;
+  relationshipHint?: string;
+};
 type InspectorNode = GraphSnapshot["nodes"][number] & {
   degree: number;
   weightedDegree: number;
@@ -114,13 +119,14 @@ export default function MtmGraph({ graph }: MtmGraphProps) {
 
     const link = graphLayer
       .append("g")
-      .attr("stroke", "rgba(125, 211, 252, 0.22)")
-      .attr("stroke-width", 1)
       .selectAll("line")
       .data(links)
       .enter()
       .append("line")
-      .attr("stroke-width", (datum) => 1 + datum.weight * 2.5);
+      .attr("stroke", (datum) => getBaseLinkStroke(datum))
+      .attr("stroke-opacity", (datum) => (datum.type === "SIMILAR_TO" ? 1 : 0.92))
+      .attr("stroke-dasharray", (datum) => getLinkDashArray(datum))
+      .attr("stroke-width", (datum) => getLinkWidth(datum));
 
     const node = graphLayer
       .append("g")
@@ -160,18 +166,18 @@ export default function MtmGraph({ graph }: MtmGraphProps) {
     node
       .append("circle")
       .attr("r", (datum) => getNodeRadius(datum))
-      .attr("fill", (datum) => color(String(datum.communityId ?? -1)))
-      .attr("stroke", "rgba(226, 232, 240, 0.28)")
+      .attr("fill", (datum) => getNodeFill(datum, color))
+      .attr("stroke", (datum) => getNodeStroke(datum))
       .attr("stroke-width", 1.5);
 
     node
       .append("title")
-      .text((datum) => `${datum.nodeId}\n${datum.content}`);
+      .text((datum) => `${datum.nodeId}\n${datum.displayLabel}`);
 
     node
       .append("text")
-      .text((datum) => `${datum.content.slice(0, 26)}${datum.content.length > 26 ? "…" : ""}`)
-      .attr("font-size", 10)
+      .text((datum) => truncateContent(datum.displayLabel, datum.type === "semantic" ? 20 : 26))
+      .attr("font-size", (datum) => (datum.type === "semantic" ? 9 : 10))
       .attr("fill", "#f8fafc")
       .attr("text-anchor", "middle")
       .attr("dy", 3)
@@ -208,22 +214,23 @@ export default function MtmGraph({ graph }: MtmGraphProps) {
       link
         .attr("stroke", (datum) => {
           if (!selectedNodeId) {
-            return "rgba(125, 211, 252, 0.22)";
+            return getBaseLinkStroke(datum);
           }
-          return selectedLinks.has(datum) ? "rgba(125, 211, 252, 0.8)" : "rgba(148, 163, 184, 0.12)";
+          return selectedLinks.has(datum) ? getHighlightedLinkStroke(datum) : "rgba(148, 163, 184, 0.12)";
         })
         .attr("stroke-opacity", (datum) => {
           if (!selectedNodeId) {
-            return 1;
+            return datum.type === "SIMILAR_TO" ? 1 : 0.92;
           }
           return selectedLinks.has(datum) ? 1 : 0.45;
         })
+        .attr("stroke-dasharray", (datum) => getLinkDashArray(datum))
         .attr("stroke-width", (datum) => {
-          const baseWidth = 0.8 + datum.weight * 2.2;
+          const baseWidth = getLinkWidth(datum);
           if (!selectedNodeId) {
             return baseWidth;
           }
-          return selectedLinks.has(datum) ? 1.8 + datum.weight * 3.4 : baseWidth;
+          return selectedLinks.has(datum) ? baseWidth + 1.5 : baseWidth;
         });
 
       node
@@ -239,9 +246,9 @@ export default function MtmGraph({ graph }: MtmGraphProps) {
             return "rgba(248, 250, 252, 0.95)";
           }
           if (selectedNodeId && connectedNodeIds.has(datum.nodeId)) {
-            return "rgba(125, 211, 252, 0.7)";
+            return datum.type === "semantic" ? "rgba(250, 204, 21, 0.85)" : "rgba(125, 211, 252, 0.75)";
           }
-          return "rgba(226, 232, 240, 0.28)";
+          return getNodeStroke(datum);
         })
         .attr("stroke-width", (datum) => (datum.nodeId === selectedNodeId ? 3 : 1.5));
 
@@ -371,8 +378,15 @@ export default function MtmGraph({ graph }: MtmGraphProps) {
         </div>
       </div>
 
+      <div className="pointer-events-none absolute left-4 top-16 z-10 flex max-w-[70%] flex-wrap gap-2">
+        <LegendPill label="Episodic Nodes" className="border-sky-300/30 bg-sky-400/10 text-sky-100" />
+        <LegendPill label="Semantic Nodes" className="border-amber-300/30 bg-amber-400/10 text-amber-100" />
+        <LegendPill label="Similarity Edges" className="border-sky-300/20 bg-sky-500/10 text-sky-100" />
+        <LegendPill label="Entity Edges" className="border-amber-300/20 bg-amber-500/10 text-amber-100" />
+      </div>
+
       <div className="pointer-events-none absolute bottom-4 left-4 z-10 rounded-full border border-white/10 bg-black/65 px-3 py-1.5 text-[11px] uppercase tracking-[0.24em] text-neutral-400 backdrop-blur">
-        Drag canvas to pan. Scroll to zoom. Click nodes to inspect memory connections.
+        Drag canvas to pan. Scroll to zoom. Click nodes to inspect episodic clusters and extracted entity links.
       </div>
 
       <div className="absolute inset-x-4 bottom-4 z-10 md:inset-x-auto md:right-4 md:w-[360px]">
@@ -394,12 +408,12 @@ function NodeInspector({
   onSelectNeighbor: (nodeId: string) => void;
 }) {
   return (
-    <div className="pointer-events-auto rounded-[20px] border border-white/10 bg-black/70 p-4 shadow-[0_18px_50px_rgba(2,6,23,0.32)] backdrop-blur-xl">
+    <div className="pointer-events-auto flex max-h-[min(72vh,36rem)] flex-col overflow-hidden rounded-[20px] border border-white/10 bg-black/70 p-4 shadow-[0_18px_50px_rgba(2,6,23,0.32)] backdrop-blur-xl">
       <div className="flex items-start justify-between gap-3">
         <div>
           <p className="text-[11px] uppercase tracking-[0.24em] text-neutral-400">Node Inspector</p>
           <p className="mt-1 text-sm text-neutral-200">
-            {selectedNode ? "Inspect content, salience, and strongest local links." : "Select a node to inspect its memory payload and connections."}
+            {selectedNode ? "Inspect content, entity metadata, salience, and strongest local links." : "Select a node to inspect its memory payload and semantic connections."}
           </p>
         </div>
         {selectedNode ? (
@@ -416,25 +430,39 @@ function NodeInspector({
       </div>
 
       {selectedNode ? (
-        <div className="mt-4 space-y-4">
+        <div className="mt-4 flex-1 space-y-4 overflow-y-auto pr-1">
           <div className="rounded-[16px] border border-white/10 bg-white/[0.04] p-3">
             <div className="flex flex-wrap items-center gap-2">
               <span className="rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1 text-[11px] uppercase tracking-[0.22em] text-neutral-300">
                 {selectedNode.type}
               </span>
-              <span className="rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1 text-[11px] uppercase tracking-[0.22em] text-neutral-300">
-                Community {selectedNode.communityId ?? "-"}
-              </span>
+              {selectedNode.type === "semantic" && selectedNode.entityType ? (
+                <span className="rounded-full border border-amber-300/20 bg-amber-500/10 px-2.5 py-1 text-[11px] uppercase tracking-[0.22em] text-amber-100">
+                  {selectedNode.entityType}
+                </span>
+              ) : (
+                <span className="rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1 text-[11px] uppercase tracking-[0.22em] text-neutral-300">
+                  Community {selectedNode.communityId ?? "-"}
+                </span>
+              )}
             </div>
             <p className="mt-3 break-all font-mono text-[11px] text-neutral-500">{selectedNode.nodeId}</p>
-            <p className="mt-2 text-sm leading-6 text-neutral-100">{selectedNode.content}</p>
+            <p className="mt-2 text-sm leading-6 text-neutral-100">{selectedNode.type === "semantic" ? selectedNode.displayLabel : selectedNode.content}</p>
+            {selectedNode.type === "semantic" && selectedNode.aliases && selectedNode.aliases.length > 1 ? (
+              <p className="mt-3 text-xs leading-5 text-neutral-400">
+                Aliases: {selectedNode.aliases.join(", ")}
+              </p>
+            ) : null}
           </div>
 
           <div className="grid grid-cols-2 gap-2 text-sm text-neutral-300">
-            <MetricPill label="PageRank" value={formatDecimal(selectedNode.pageRank ?? 0, 3)} />
+            <MetricPill
+              label={selectedNode.type === "semantic" ? "Mentions" : "PageRank"}
+              value={selectedNode.type === "semantic" ? String(selectedNode.mentionCount ?? 0) : formatDecimal(selectedNode.pageRank ?? 0, 3)}
+            />
             <MetricPill label="Connections" value={String(selectedNode.degree)} />
             <MetricPill label="Weighted Degree" value={formatDecimal(selectedNode.weightedDegree, 2)} />
-            <MetricPill label="Consolidated" value={formatTimestamp(selectedNode.consolidatedAt)} />
+            <MetricPill label={selectedNode.type === "semantic" ? "Updated" : "Consolidated"} value={formatTimestamp(selectedNode.consolidatedAt)} />
           </div>
 
           <div>
@@ -449,11 +477,19 @@ function NodeInspector({
                     className="flex w-full items-start justify-between gap-3 rounded-[14px] border border-white/10 bg-white/[0.04] px-3 py-2.5 text-left transition-colors hover:border-white/20 hover:bg-white/[0.08]"
                   >
                     <div>
-                      <p className="text-sm text-neutral-100">{truncateContent(neighbor.content, 64)}</p>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="text-sm text-neutral-100">{truncateContent(neighbor.displayLabel, 64)}</p>
+                        <span className="rounded-full border border-white/10 bg-black/35 px-2 py-0.5 text-[10px] uppercase tracking-[0.22em] text-neutral-300">
+                          {formatEdgeType(neighbor.edgeType)}
+                        </span>
+                      </div>
                       <p className="mt-1 font-mono text-[11px] text-neutral-500">{truncateContent(neighbor.nodeId, 28)}</p>
+                      {neighbor.relationshipHint ? (
+                        <p className="mt-1 text-[11px] leading-5 text-neutral-500">{neighbor.relationshipHint}</p>
+                      ) : null}
                     </div>
                     <span className="rounded-full border border-white/10 bg-black/35 px-2 py-1 font-mono text-[11px] text-neutral-300">
-                      {formatDecimal(neighbor.weight, 2)}
+                      {neighbor.confidence !== undefined ? formatDecimal(neighbor.confidence, 2) : formatDecimal(neighbor.weight, 2)}
                     </span>
                   </button>
                 ))}
@@ -504,8 +540,20 @@ function buildNodeInspectorData(graph: GraphSnapshot) {
     target.degree += 1;
     source.weightedDegree += edge.weight;
     target.weightedDegree += edge.weight;
-    source.neighbors.push({ ...targetNode, weight: edge.weight });
-    target.neighbors.push({ ...sourceNode, weight: edge.weight });
+    source.neighbors.push({
+      ...targetNode,
+      weight: edge.weight,
+      edgeType: edge.type,
+      confidence: edge.confidence,
+      relationshipHint: edge.relationshipHint,
+    });
+    target.neighbors.push({
+      ...sourceNode,
+      weight: edge.weight,
+      edgeType: edge.type,
+      confidence: edge.confidence,
+      relationshipHint: edge.relationshipHint,
+    });
   });
 
   detailsById.forEach((node) => {
@@ -577,8 +625,8 @@ function calculateFitTransform(nodes: RenderNode[], width: number, height: numbe
 
 function createGraphSignature(graph: GraphSnapshot) {
   return [
-    graph.nodes.map((node) => node.nodeId).join("|"),
-    graph.edges.map((edge) => `${edge.source}:${edge.target}:${edge.weight.toFixed(3)}`).join("|"),
+    graph.nodes.map((node) => `${node.nodeId}:${node.type}:${node.displayLabel}`).join("|"),
+    graph.edges.map((edge) => `${edge.source}:${edge.target}:${edge.type}:${edge.weight.toFixed(3)}`).join("|"),
   ].join("::");
 }
 
@@ -586,7 +634,10 @@ function transformsAreClose(left: d3.ZoomTransform, right: d3.ZoomTransform) {
   return Math.abs(left.k - right.k) < 0.001 && Math.abs(left.x - right.x) < 0.5 && Math.abs(left.y - right.y) < 0.5;
 }
 
-function getNodeRadius(node: { pageRank?: number }) {
+function getNodeRadius(node: { type: "episodic" | "semantic"; pageRank?: number; mentionCount?: number }) {
+  if (node.type === "semantic") {
+    return 10 + Math.min(8, (node.mentionCount ?? 1) * 0.65);
+  }
   return 12 + Math.max(0, (node.pageRank ?? 0) * 16);
 }
 
@@ -604,6 +655,58 @@ function formatTimestamp(value: string) {
 function formatDecimal(value: number, digits: number) {
   return value.toFixed(digits);
 }
+
+function getNodeFill(node: GraphSnapshot["nodes"][number], communityColor: d3.ScaleOrdinal<string, string>) {
+  if (node.type === "semantic") {
+    return semanticNodeColor[node.entityType ?? "topic"];
+  }
+
+  return communityColor(String(node.communityId ?? -1));
+}
+
+function getNodeStroke(node: GraphSnapshot["nodes"][number]) {
+  if (node.type === "semantic") {
+    return "rgba(252, 211, 77, 0.62)";
+  }
+
+  return "rgba(226, 232, 240, 0.28)";
+}
+
+function getBaseLinkStroke(link: GraphSnapshot["edges"][number]) {
+  return link.type === "SIMILAR_TO" ? "rgba(125, 211, 252, 0.22)" : "rgba(251, 191, 36, 0.4)";
+}
+
+function getHighlightedLinkStroke(link: GraphSnapshot["edges"][number]) {
+  return link.type === "SIMILAR_TO" ? "rgba(125, 211, 252, 0.82)" : "rgba(251, 191, 36, 0.88)";
+}
+
+function getLinkWidth(link: GraphSnapshot["edges"][number]) {
+  if (link.type === "SIMILAR_TO") {
+    return 0.8 + link.weight * 2.2;
+  }
+
+  return 1.3 + (link.confidence ?? link.weight) * 1.8;
+}
+
+function getLinkDashArray(link: GraphSnapshot["edges"][number]) {
+  return link.type === "SIMILAR_TO" ? undefined : "6 5";
+}
+
+function formatEdgeType(value: GraphSnapshot["edges"][number]["type"]) {
+  return value.toLowerCase().replace(/_/g, " ");
+}
+
+function LegendPill({ label, className }: { label: string; className: string }) {
+  return <span className={`rounded-full border px-3 py-1 text-[10px] uppercase tracking-[0.24em] ${className}`}>{label}</span>;
+}
+
+const semanticNodeColor: Record<NonNullable<GraphSnapshot["nodes"][number]["entityType"]>, string> = {
+  person: "rgba(244, 114, 182, 0.78)",
+  location: "rgba(74, 222, 128, 0.78)",
+  project: "rgba(168, 85, 247, 0.78)",
+  tool: "rgba(249, 115, 22, 0.78)",
+  topic: "rgba(250, 204, 21, 0.78)",
+};
 
 function GraphControlButton({
   children,

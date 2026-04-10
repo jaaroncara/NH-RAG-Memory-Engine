@@ -71,7 +71,7 @@ export default function MemoryDashboard() {
 
     try {
       // 1. Add to STM
-      await MemoryService.addEpisodicLog(sessionId, Actor.USER, userText);
+      const userInteractionId = await MemoryService.addEpisodicLog(sessionId, Actor.USER, userText);
       await loadSTM();
 
       // 2. Search LTM for context
@@ -81,12 +81,12 @@ export default function MemoryDashboard() {
       // 3. Simulate Agent Response (In a real app, call Gemini here)
       const agentResponse = `I've recorded your message in the Short-Term Memory. ${context && context.length > 0 ? `I also recalled some relevant long-term facts: "${context[0].distilledFact}"` : "I'm still building my long-term knowledge base."}`;
       
-      const interactionId = await MemoryService.addEpisodicLog(sessionId, Actor.AGENT, agentResponse);
+      await MemoryService.addEpisodicLog(sessionId, Actor.AGENT, agentResponse);
       await loadSTM();
 
       // 4. Consolidate to MTM (Asynchronous in theory, but here for demo)
-      if (interactionId) {
-        await MemoryService.consolidateToMTM(interactionId, userText);
+      if (userInteractionId) {
+        await MemoryService.consolidateToMTM(userInteractionId, userText);
       }
 
       toast.success("Memory encoded successfully");
@@ -207,14 +207,14 @@ export default function MemoryDashboard() {
               <div className="space-y-4">
                 <div className="flex justify-between items-center border-b border-ink/20 pb-2">
                   <span className="text-xs font-mono uppercase">Nodes</span>
-                  <span className="font-mono font-bold">{stats.stm}</span>
+                  <span className="font-mono font-bold">{stats.mtm}</span>
                 </div>
                 <div className="flex justify-between items-center border-b border-ink/20 pb-2">
-                  <span className="text-xs font-mono uppercase">Edges (Similarity)</span>
+                  <span className="text-xs font-mono uppercase">Edges (Similarity + Entity)</span>
                   <span className="font-mono font-bold">--</span>
                 </div>
                 <div className="p-3 bg-transparent border border-ink/20 text-[10px] font-mono leading-relaxed">
-                  <p className="opacity-60 italic">"MTM maps associative relationships using vector similarity edges. Nodes below the Salience Threshold are pruned during Sleep-Cycle."</p>
+                  <p className="opacity-60 italic">"MTM now combines vector similarity edges with extracted semantic entity links. Nodes below the Salience Threshold are still pruned during Sleep-Cycle."</p>
                 </div>
               </div>
             </CardContent>

@@ -44,7 +44,15 @@ export default function DatabaseConsole() {
   const [graph, setGraph] = useState<GraphSnapshot>({
     nodes: [],
     edges: [],
-    stats: { nodeCount: 0, edgeCount: 0, communityCount: 0 },
+    stats: {
+      nodeCount: 0,
+      edgeCount: 0,
+      communityCount: 0,
+      episodicNodeCount: 0,
+      semanticNodeCount: 0,
+      similarityEdgeCount: 0,
+      semanticEdgeCount: 0,
+    },
   });
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [stmQuery, setStmQuery] = useState("");
@@ -580,10 +588,12 @@ function StmView({
 function MtmView({ graph }: { graph: GraphSnapshot }) {
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 md:grid-cols-3">
+      <div className="grid gap-4 md:grid-cols-5">
         {[
           { label: "Nodes", value: graph.stats.nodeCount },
+          { label: "Semantic Nodes", value: graph.stats.semanticNodeCount },
           { label: "Edges", value: graph.stats.edgeCount },
+          { label: "Entity Edges", value: graph.stats.semanticEdgeCount },
           { label: "Communities", value: graph.stats.communityCount },
         ].map((card) => (
           <Card key={card.label} className="border-white/10 bg-white/[0.04] text-neutral-100 shadow-none">
@@ -597,7 +607,7 @@ function MtmView({ graph }: { graph: GraphSnapshot }) {
       <Card className="border-white/10 bg-white/[0.04] text-neutral-100 shadow-none">
         <CardHeader>
           <CardTitle>Medium-Term Memory Network</CardTitle>
-          <CardDescription className="text-neutral-400">A bounded subgraph of the latest episodic nodes with similarity edges and community coloring. The graph can be panned, zoomed, and expanded into fullscreen for inspection.</CardDescription>
+          <CardDescription className="text-neutral-400">A bounded subgraph of recent episodic nodes enriched with extracted semantic entities, typed entity edges, similarity links, and community coloring. The graph can be panned, zoomed, and expanded into fullscreen for inspection.</CardDescription>
         </CardHeader>
         <CardContent className="pt-0">
           <MtmGraph graph={graph} />

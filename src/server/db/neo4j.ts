@@ -26,6 +26,9 @@ export async function initNeo4j(): Promise<void> {
     await session.run(
       "CREATE CONSTRAINT semantic_node_id IF NOT EXISTS FOR (n:SemanticNode) REQUIRE n.entityId IS UNIQUE"
     );
+    await session.run(
+      "CREATE INDEX semantic_node_lookup IF NOT EXISTS FOR (n:SemanticNode) ON (n.entityType, n.canonicalKey)"
+    );
     console.log("Neo4j constraints initialized");
   } finally {
     await session.close();
