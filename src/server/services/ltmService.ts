@@ -1,12 +1,21 @@
+import { createHash } from "node:crypto";
+
+import { sql } from "drizzle-orm";
+
 import { db } from "../db/index.js";
 import { longTermMemory } from "../db/schema.js";
-import { desc, sql } from "drizzle-orm";
 import { getProvider } from "../providers/index.js";
+
+export interface EmbeddingSummary {
+  dimensions: number;
+  checksum: string;
+}
 
 export interface SemanticFact {
   knowledgeId: string;
   distilledFact: string;
   embedding: number[];
+  embeddingSummary: EmbeddingSummary;
   lastAccessed: string;
   provenance: string[];
   score?: number;
@@ -16,6 +25,61 @@ export interface SemanticFact {
 export interface LtmExplorerResult {
   facts: SemanticFact[];
   total: number;
+}
+
+function parseEmbeddingText(rawEmbedding: unknown): number[] {
+  if (typeof rawEmbedding !== "string") {
+    return [];
+  }
+
+  const trimmed = rawEmbedding.trim();
+  if (!trimmed.startsWith("[") || !trimmed.endsWith("]")) {
+    return [];
+  }
+
+  const body = trimmed.slice(1, -1).trim();
+  if (!body) {
+    return [];
+  }
+
+  return body
+    .split(",")
+    .map((value) => Number(value.trim()))
+    .filter((value) => Number.isFinite(value));
+}
+
+function summarizeEmbedding(rawEmbedding: unknown): EmbeddingSummary {
+  const values = parseEmbeddingText(rawEmbedding);
+  const canonical = values.map((value) => value.toExponential(12)).join(",");
+
+  return {
+    dimensions: values.length,
+    checksum: createHash("sha256").update(canonical).digest("hex"),
+  };
+}
+
+function toIsoString(value: unknown): string {
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  return new Date(String(value)).toISOString();
+}
+
+function toSemanticFact(row: Record<string, unknown>): SemanticFact {
+  return {
+    knowledgeId: String(row.knowledge_id ?? ""),
+    distilledFact: String(row.distilled_fact ?? ""),
+    embedding: [],
+    embeddingSummary: summarizeEmbedding(row.embedding_text),
+    lastAccessed: toIsoString(row.last_accessed),
+    provenance: Array.isArray(row.provenance) ? row.provenance.map((value) => String(value)) : [],
+    score: row.score == null ? undefined : Number(row.score),
+    metadata:
+      row.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata)
+        ? (row.metadata as Record<string, unknown>)
+        : undefined,
+  };
 }
 
 export async function searchLTM(
@@ -30,6 +94,7 @@ export async function searchLTM(
     SELECT
       knowledge_id,
       distilled_fact,
+      embedding::text AS embedding_text,
       last_accessed,
       provenance,
       1 - (embedding <=> ${vecLiteral}::vector) AS score
@@ -38,14 +103,7 @@ export async function searchLTM(
     LIMIT ${limitCount}
   `);
 
-  return (rows.rows as any[]).map((r) => ({
-    knowledgeId: r.knowledge_id,
-    distilledFact: r.distilled_fact,
-    embedding: [],
-    lastAccessed: r.last_accessed,
-    provenance: r.provenance || [],
-    score: Number(r.score),
-  }));
+  return (rows.rows as Record<string, unknown>[]).map(toSemanticFact);
 }
 
 export async function storeFact(
@@ -67,26 +125,27 @@ export async function listLtmFacts(options?: {
 }): Promise<LtmExplorerResult> {
   const page = Math.max(options?.page ?? 1, 1);
   const pageSize = Math.min(Math.max(options?.pageSize ?? 20, 1), 100);
-  const rows = await db
-    .select()
-    .from(longTermMemory)
-    .orderBy(desc(longTermMemory.lastAccessed))
-    .limit(pageSize)
-    .offset((page - 1) * pageSize);
+  const offset = (page - 1) * pageSize;
+  const rows = await db.execute(sql`
+    SELECT
+      knowledge_id,
+      distilled_fact,
+      embedding::text AS embedding_text,
+      last_accessed,
+      provenance,
+      metadata
+    FROM long_term_memory
+    ORDER BY last_accessed DESC
+    LIMIT ${pageSize}
+    OFFSET ${offset}
+  `);
 
   const [totalRow] = await db
     .select({ count: sql<number>`count(*)::int` })
     .from(longTermMemory);
 
   return {
-    facts: rows.map((row) => ({
-      knowledgeId: row.knowledgeId,
-      distilledFact: row.distilledFact,
-      embedding: [],
-      lastAccessed: row.lastAccessed.toISOString(),
-      provenance: row.provenance ?? [],
-      metadata: row.metadata as Record<string, unknown>,
-    })),
+    facts: (rows.rows as Record<string, unknown>[]).map(toSemanticFact),
     total: totalRow.count,
   };
 }

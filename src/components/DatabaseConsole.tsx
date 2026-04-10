@@ -158,9 +158,9 @@ export default function DatabaseConsole() {
       <div className="mx-auto grid min-h-screen max-w-[1600px] grid-cols-1 gap-5 px-4 py-5 lg:grid-cols-[228px_minmax(0,1fr)] lg:px-6">
         <aside className="rounded-[18px] border border-white/10 bg-neutral-900/50 p-4 shadow-[0_18px_50px_rgba(2,6,23,0.34)] backdrop-blur-xl">
           <div className="mb-8 space-y-2">
-            <p className="text-xs uppercase tracking-[0.3em] text-zinc-300/70">NH-RAG Ops</p>
-            <h1 className="font-heading text-2xl font-semibold tracking-tight text-white">Control Panel</h1>
-            <p className="text-sm leading-6 text-neutral-400">Inspect document ingestion, STM queues, MTM graph topology, and long-term fact condensation.</p>
+            <p className="text-xs uppercase tracking-[0.3em] text-zinc-300/70">Neuro-Hierarchical</p>
+            <h1 className="font-heading text-2xl font-semibold tracking-tight text-white">RAG Ops</h1>
+            <p className="text-sm leading-6 text-neutral-400">Biomimetic Agentic Memory Consolidation & Algorithmic Forgetting.</p>
           </div>
 
           <nav className="space-y-2">
@@ -205,7 +205,7 @@ export default function DatabaseConsole() {
         <main className="space-y-6">
           <div className="flex flex-col gap-4 rounded-[18px] border border-white/10 bg-neutral-900/50 p-5 shadow-[0_12px_32px_rgba(2,6,23,0.24)] backdrop-blur-xl xl:flex-row xl:items-center xl:justify-between">
             <div>
-              <p className="text-xs uppercase tracking-[0.28em] text-neutral-500">Operator Surface</p>
+              <p className="text-xs uppercase tracking-[0.28em] text-neutral-500">Memory Layer</p>
               <h2 className="mt-1 font-heading text-3xl font-semibold">{navItems.find((item) => (item.to === "/" ? location.pathname === "/" : location.pathname.startsWith(item.to)))?.label ?? "Overview"}</h2>
             </div>
             <div className="flex flex-wrap gap-3">
@@ -612,7 +612,7 @@ function LtmView({ ltm }: { ltm: { facts: SemanticFact[]; total: number } }) {
     <Card className="border-white/10 bg-white/[0.04] text-neutral-100 shadow-none">
       <CardHeader>
         <CardTitle>Long-Term Memory Fact Store</CardTitle>
-        <CardDescription className="text-neutral-400">pgvector-backed semantic facts distilled from MTM communities</CardDescription>
+        <CardDescription className="text-neutral-400">pgvector-backed semantic facts distilled from MTM communities with vector fingerprints for validation</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
         {ltm.facts.map((fact) => (
@@ -620,6 +620,15 @@ function LtmView({ ltm }: { ltm: { facts: SemanticFact[]; total: number } }) {
             <div className="flex items-start justify-between gap-3">
               <p className="text-base font-medium text-white">{fact.distilledFact}</p>
               <Badge className="bg-white/10 text-neutral-100">{fact.provenance?.length ?? 0} sources</Badge>
+            </div>
+            <div className="mt-3 rounded-[14px] border border-white/10 bg-neutral-950/55 p-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <Badge className={fact.embeddingSummary.dimensions > 0 ? "bg-emerald-300/90 text-emerald-950" : "bg-rose-300/90 text-rose-950"}>
+                  {fact.embeddingSummary.dimensions > 0 ? `${fact.embeddingSummary.dimensions}-dim vector` : "Vector unavailable"}
+                </Badge>
+                <span className="text-[11px] uppercase tracking-[0.22em] text-neutral-500">SHA-256 fingerprint</span>
+              </div>
+              <p className="mt-2 break-all font-mono text-xs text-neutral-300">{fact.embeddingSummary.checksum}</p>
             </div>
             <p className="mt-2 text-sm text-neutral-400">Last accessed {new Date(fact.lastAccessed).toLocaleString()}</p>
           </div>

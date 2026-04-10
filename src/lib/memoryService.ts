@@ -19,10 +19,16 @@ export interface EpisodicMemory {
   metadata?: Record<string, unknown>;
 }
 
+export interface EmbeddingSummary {
+  dimensions: number;
+  checksum: string;
+}
+
 export interface SemanticFact {
   knowledgeId: string;
   distilledFact: string;
   embedding: number[];
+  embeddingSummary: EmbeddingSummary;
   lastAccessed: string;
   provenance?: string[];
   score?: number;
