@@ -1,6 +1,7 @@
 import neo4j from "neo4j-driver";
 
 import { getNeo4jDriver } from "../db/neo4j.js";
+import { normalizeEmbedding } from "../embeddings.js";
 import { getProvider } from "../providers/index.js";
 
 export interface GraphNode {
@@ -35,7 +36,7 @@ export async function consolidateToMTM(
   content: string
 ): Promise<string> {
   const provider = getProvider();
-  const embedding = await provider.embed(content);
+  const embedding = normalizeEmbedding(await provider.embed(content));
   const driver = getNeo4jDriver();
   const session = driver.session();
 
@@ -66,7 +67,7 @@ export async function consolidateToMTM(
 
     for (const record of result.records) {
       const otherId = record.get("id");
-      const otherEmb = record.get("emb") as number[];
+      const otherEmb = normalizeEmbedding(record.get("emb") as number[]);
       const sim = cosineSimilarity(embedding, otherEmb);
 
       if (sim > SIMILARITY_THRESHOLD) {

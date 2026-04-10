@@ -1,4 +1,5 @@
 import { GoogleGenAI } from "@google/genai";
+import { EMBEDDING_DIMENSIONS, normalizeEmbedding, zeroEmbedding } from "../embeddings.js";
 import type { EmbeddingProvider } from "./types.js";
 
 export class GeminiProvider implements EmbeddingProvider {
@@ -13,11 +14,14 @@ export class GeminiProvider implements EmbeddingProvider {
       const result = await this.client.models.embedContent({
         model: "gemini-embedding-2-preview",
         contents: [{ parts: [{ text }] }],
+        config: {
+          outputDimensionality: EMBEDDING_DIMENSIONS,
+        },
       });
-      return result.embeddings[0].values;
+      return normalizeEmbedding(result.embeddings[0]?.values ?? []);
     } catch (error) {
       console.error("Gemini embedding error:", error);
-      return new Array(768).fill(0);
+      return zeroEmbedding();
     }
   }
 

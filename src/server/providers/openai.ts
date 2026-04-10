@@ -1,4 +1,5 @@
 import OpenAI from "openai";
+import { EMBEDDING_DIMENSIONS, normalizeEmbedding, zeroEmbedding } from "../embeddings.js";
 import type { EmbeddingProvider } from "./types.js";
 
 export class OpenAIProvider implements EmbeddingProvider {
@@ -13,12 +14,12 @@ export class OpenAIProvider implements EmbeddingProvider {
       const response = await this.client.embeddings.create({
         model: "text-embedding-3-small",
         input: text,
-        dimensions: 768,
+        dimensions: EMBEDDING_DIMENSIONS,
       });
-      return response.data[0].embedding;
+      return normalizeEmbedding(response.data[0]?.embedding ?? []);
     } catch (error) {
       console.error("OpenAI embedding error:", error);
-      return new Array(768).fill(0);
+      return zeroEmbedding();
     }
   }
 

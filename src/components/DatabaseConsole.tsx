@@ -25,11 +25,11 @@ import MtmGraph from "./MtmGraph";
 
 const navItems = [
   { to: "/", label: "Overview", icon: Activity },
-  { to: "/documents", label: "Documents", icon: HardDriveUpload },
-  { to: "/stm", label: "STM", icon: Database },
-  { to: "/mtm", label: "MTM Graph", icon: Orbit },
-  { to: "/ltm", label: "LTM", icon: Sparkles },
-  { to: "/jobs", label: "Jobs", icon: GitBranch },
+  { to: "/documents", label: "Document Loader", icon: HardDriveUpload },
+  { to: "/stm", label: "STM Base", icon: Database },
+  { to: "/mtm", label: "MTM Network", icon: Orbit },
+  { to: "/ltm", label: "LTM Store", icon: Sparkles },
+  { to: "/jobs", label: "Logs", icon: GitBranch },
 ];
 
 export default function DatabaseConsole() {
@@ -160,7 +160,7 @@ export default function DatabaseConsole() {
           <div className="mb-8 space-y-2">
             <p className="text-xs uppercase tracking-[0.3em] text-zinc-300/70">NH-RAG Ops</p>
             <h1 className="font-heading text-2xl font-semibold tracking-tight text-white">Control Panel</h1>
-            <p className="text-sm leading-6 text-neutral-400">Inspect document ingestion, STM queues, MTM graph topology, and long-term fact distillation.</p>
+            <p className="text-sm leading-6 text-neutral-400">Inspect document ingestion, STM queues, MTM graph topology, and long-term fact condensation.</p>
           </div>
 
           <nav className="space-y-2">
@@ -530,7 +530,7 @@ function StmView({
       <CardHeader>
         <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
           <div>
-            <CardTitle>Short-Term Memory Explorer</CardTitle>
+            <CardTitle>Short-Term Memory Knowledge Base</CardTitle>
             <CardDescription className="text-neutral-400">Deterministic PostgreSQL view of imported chunks and live episodic rows</CardDescription>
           </div>
           <div className="flex gap-3">
@@ -596,7 +596,7 @@ function MtmView({ graph }: { graph: GraphSnapshot }) {
       </div>
       <Card className="border-white/10 bg-white/[0.04] text-neutral-100 shadow-none">
         <CardHeader>
-          <CardTitle>Neo4j Medium-Term Memory Graph</CardTitle>
+          <CardTitle>Medium-Term Memory Network</CardTitle>
           <CardDescription className="text-neutral-400">A bounded subgraph of the latest episodic nodes with similarity edges and community coloring.</CardDescription>
         </CardHeader>
         <CardContent>

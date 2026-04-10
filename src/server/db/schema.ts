@@ -8,11 +8,12 @@ import {
   timestamp,
   uuid,
 } from "drizzle-orm/pg-core";
+import { EMBEDDING_DIMENSIONS } from "../embeddings.js";
 
 // Custom pgvector type for Drizzle
 const vector = customType<{ data: number[]; driverData: string }>({
   dataType() {
-    return "vector(768)";
+    return `vector(${EMBEDDING_DIMENSIONS})`;
   },
   toDriver(value: number[]): string {
     return `[${value.join(",")}]`;
