@@ -29,8 +29,8 @@ const navItems = [
   { to: "/documents", label: "Document Loader", icon: HardDriveUpload },
   { to: "/stm", label: "STM Base", icon: Database },
   { to: "/mtm", label: "MTM Network", icon: Orbit },
-  { to: "/console", label: "Data Console", icon: ServerCog },
   { to: "/ltm", label: "LTM Store", icon: Sparkles },
+  { to: "/console", label: "Data Console", icon: ServerCog },
   { to: "/jobs", label: "Logs", icon: GitBranch },
 ];
 
