@@ -1,7 +1,7 @@
 import { getDocumentStats } from "./documentService.js";
 import { listJobs, listPipelineEvents } from "./jobService.js";
 import { getLtmCount } from "./ltmService.js";
-import { getGraphSnapshot, getMtmCount } from "./mtmService.js";
+import { getGraphStats, getMtmCount } from "./mtmService.js";
 import { getStmCount } from "./stmService.js";
 
 export async function getOverviewMetrics() {
@@ -12,7 +12,7 @@ export async function getOverviewMetrics() {
     getLtmCount(),
     listJobs(12),
     listPipelineEvents({ limit: 12 }),
-    getGraphSnapshot(30),
+    getGraphStats(),
   ]);
 
   return {
@@ -29,6 +29,6 @@ export async function getOverviewMetrics() {
     },
     recentJobs: jobs,
     recentEvents: events,
-    graph: graph.stats,
+    graph,
   };
 }

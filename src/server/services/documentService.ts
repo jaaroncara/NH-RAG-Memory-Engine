@@ -6,7 +6,7 @@ import { db } from "../db/index.js";
 import { documentChunks, documents, ingestionJobs } from "../db/schema.js";
 import { chunkParsedDocument, parseDocumentWithDocling } from "./doclingService.js";
 import { createJob, listPipelineEvents, markJobCompleted, markJobFailed, markJobRunning, recordPipelineEvent } from "./jobService.js";
-import { consolidateToMTM } from "./mtmService.js";
+import { consolidateToMTM, refreshMtmGraphAnalytics } from "./mtmService.js";
 import { addDocumentChunksToSTM } from "./stmService.js";
 
 export interface DocumentRecord {
@@ -154,6 +154,29 @@ export async function importUploadedDocuments(files: Express.Multer.File[]) {
         message: "Promoted STM chunks into MTM graph",
         payload: { promotedChunks: interactionIds.length },
       });
+
+      await markJobRunning(jobId, "refreshing_graph", 82);
+      try {
+        await refreshMtmGraphAnalytics();
+        await recordPipelineEvent({
+          jobId,
+          documentId: document.documentId,
+          stage: "refreshing_graph",
+          message: "Recomputed MTM PageRank and communities across the full graph",
+          payload: { promotedChunks: interactionIds.length },
+        });
+      } catch (error) {
+        await recordPipelineEvent({
+          jobId,
+          documentId: document.documentId,
+          stage: "refreshing_graph",
+          level: "warning",
+          message: "MTM graph analytics refresh failed after promotion",
+          payload: {
+            error: error instanceof Error ? error.message : String(error),
+          },
+        });
+      }
 
       await db
         .update(documents)

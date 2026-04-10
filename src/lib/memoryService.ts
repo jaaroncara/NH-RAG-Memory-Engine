@@ -91,46 +91,68 @@ export interface PipelineEvent {
   createdAt: string;
 }
 
+export interface GraphSemanticEntity {
+  entityId: string;
+  entityType: "person" | "location" | "project" | "tool" | "topic";
+  canonicalName: string;
+  aliases: string[];
+  relationshipType:
+    | "MENTIONS_PERSON"
+    | "MENTIONS_LOCATION"
+    | "LOCATED_IN"
+    | "REFERENCES_PROJECT"
+    | "WORKS_ON_PROJECT"
+    | "USES_TOOL"
+    | "MENTIONS_TOOL"
+    | "HAS_TOPIC"
+    | "MENTIONS_TOPIC"
+    | "RELATED_TO_ENTITY";
+  relationshipHint: string | null;
+  confidence: number;
+  mentionCount: number;
+}
+
+export interface GraphSharedSemanticEntity {
+  entityId: string;
+  entityType: "person" | "location" | "project" | "tool" | "topic";
+  canonicalName: string;
+  confidence: number;
+  relationshipTypes: GraphSemanticEntity["relationshipType"][];
+  relationshipHints: string[];
+}
+
 export interface GraphSnapshot {
   nodes: Array<{
     nodeId: string;
-    type: "episodic" | "semantic";
+    type: "episodic";
     content: string;
     displayLabel: string;
     consolidatedAt: string;
     pageRank?: number;
     communityId?: number;
-    entityType?: "person" | "location" | "project" | "tool" | "topic";
-    aliases?: string[];
-    mentionCount?: number;
+    semanticEntityCount: number;
+    semanticMaxConfidence: number;
+    semanticEntities: GraphSemanticEntity[];
   }>;
   edges: Array<{
     source: string;
     target: string;
     weight: number;
-    type:
-      | "SIMILAR_TO"
-      | "MENTIONS_PERSON"
-      | "MENTIONS_LOCATION"
-      | "LOCATED_IN"
-      | "REFERENCES_PROJECT"
-      | "WORKS_ON_PROJECT"
-      | "USES_TOOL"
-      | "MENTIONS_TOOL"
-      | "HAS_TOPIC"
-      | "MENTIONS_TOPIC"
-      | "RELATED_TO_ENTITY";
-    confidence?: number;
-    relationshipHint?: string;
+    type: "SIMILAR_TO";
+    cosineWeight: number;
+    semanticOverlapWeight: number;
+    sharedEntityCount: number;
+    sharedEntities: GraphSharedSemanticEntity[];
+    updatedAt?: string;
   }>;
   stats: {
     nodeCount: number;
     edgeCount: number;
     communityCount: number;
     episodicNodeCount: number;
-    semanticNodeCount: number;
+    annotatedNodeCount: number;
     similarityEdgeCount: number;
-    semanticEdgeCount: number;
+    overlapEdgeCount: number;
   };
 }
 
@@ -152,6 +174,10 @@ export interface OverviewMetrics {
     nodeCount: number;
     edgeCount: number;
     communityCount: number;
+    episodicNodeCount?: number;
+    annotatedNodeCount?: number;
+    similarityEdgeCount?: number;
+    overlapEdgeCount?: number;
   };
 }
 
@@ -307,8 +333,10 @@ export class MemoryService {
     return data.nodeId;
   }
 
-  static async getGraph(limitCount: number = 40): Promise<GraphSnapshot> {
-    const res = await fetch(`${API}/mtm/graph?limit=${limitCount}`);
+  static async getGraph(limitCount?: number): Promise<GraphSnapshot> {
+    const res = await fetch(
+      limitCount === undefined ? `${API}/mtm/graph` : `${API}/mtm/graph?limit=${limitCount}`
+    );
     return json<GraphSnapshot>(res);
   }
 

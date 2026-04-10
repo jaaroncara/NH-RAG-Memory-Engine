@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
-import { consolidateToMTM, getGraphSnapshot } from "../services/mtmService.js";
+import { consolidateToMTM, getGraphSnapshot, refreshMtmGraphAnalytics } from "../services/mtmService.js";
 
 const router = Router();
 
@@ -13,7 +13,16 @@ router.post("/consolidate", async (req, res) => {
   try {
     const body = consolidateSchema.parse(req.body);
     const id = await consolidateToMTM(body.interactionId, body.content);
-    res.status(201).json({ nodeId: id });
+
+    let analyticsRefreshed = true;
+    try {
+      await refreshMtmGraphAnalytics();
+    } catch (error) {
+      analyticsRefreshed = false;
+      console.error("MTM analytics refresh error:", error);
+    }
+
+    res.status(201).json({ nodeId: id, analyticsRefreshed });
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: error.issues });
@@ -26,7 +35,8 @@ router.post("/consolidate", async (req, res) => {
 
 router.get("/graph", async (req, res) => {
   try {
-    const limit = Math.min(Number(req.query.limit) || 40, 120);
+    const rawLimit = typeof req.query.limit === "string" ? req.query.limit : undefined;
+    const limit = rawLimit ? Math.min(Math.max(Number(rawLimit) || 1, 1), 500) : undefined;
     const graph = await getGraphSnapshot(limit);
     res.json(graph);
   } catch (error) {

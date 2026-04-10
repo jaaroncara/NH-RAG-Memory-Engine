@@ -1,22 +1,18 @@
 import { getNeo4jDriver } from "../db/neo4j.js";
 import { getProvider } from "../providers/index.js";
-import { SEMANTIC_RELATIONSHIP_TYPES } from "./entityExtractionService.js";
 import { storeFact } from "./ltmService.js";
 import { createJob, markJobCompleted, markJobFailed, markJobRunning, recordPipelineEvent } from "./jobService.js";
+import { parseStoredSemanticEntities, type StoredSemanticEntity } from "./semanticGraphAttributes.js";
 
 const SALIENCE_PERCENTILE = 25;
 const MIN_COMMUNITY_SIZE = 3;
-const SLEEP_CYCLE_NODE_LABELS = ["EpisodicNode", "SemanticNode"];
-const SLEEP_CYCLE_RELATIONSHIP_PROJECTION = Object.fromEntries(
-  ["SIMILAR_TO", ...SEMANTIC_RELATIONSHIP_TYPES].map((relationshipType) => [
-    relationshipType,
-    { orientation: "UNDIRECTED", properties: ["weight"] },
-  ])
-);
+const SLEEP_CYCLE_NODE_LABELS = ["EpisodicNode"];
+const SLEEP_CYCLE_RELATIONSHIP_PROJECTION = {
+  SIMILAR_TO: { orientation: "UNDIRECTED", properties: ["combinedWeight"] },
+};
 
 interface PageRankScore {
   graphNodeId: string;
-  nodeType: string;
   score: number;
 }
 
@@ -90,12 +86,11 @@ export async function runSleepCycle(): Promise<{
     // ------------------------------------------------------------------
     const prResult = await session.run(
       `CALL gds.pageRank.stream($graphName, {
-        relationshipWeightProperty: 'weight',
+        relationshipWeightProperty: 'combinedWeight',
         dampingFactor: 0.85
       })
       YIELD nodeId, score
-      RETURN coalesce(gds.util.asNode(nodeId).nodeId, gds.util.asNode(nodeId).entityId) AS graphNodeId,
-             coalesce(gds.util.asNode(nodeId).type, '') AS nodeType,
+      RETURN gds.util.asNode(nodeId).nodeId AS graphNodeId,
              score
       ORDER BY score ASC`,
       { graphName }
@@ -103,18 +98,14 @@ export async function runSleepCycle(): Promise<{
 
     const scores: PageRankScore[] = prResult.records.map((r) => ({
       graphNodeId: String(r.get("graphNodeId") ?? ""),
-      nodeType: String(r.get("nodeType") ?? ""),
       score: Number(r.get("score") ?? 0),
     }));
-    const episodicScores = scores.filter(
-      (score) => score.nodeType === "episodic" && score.graphNodeId.length > 0
-    );
-    const semanticScoreCount = scores.filter((score) => score.nodeType === "semantic").length;
+    const episodicScores = scores.filter((score) => score.graphNodeId.length > 0);
 
     // Write PageRank back to nodes for reference
     await session.run(
       `CALL gds.pageRank.write($graphName, {
-        relationshipWeightProperty: 'weight',
+        relationshipWeightProperty: 'combinedWeight',
         dampingFactor: 0.85,
         writeProperty: 'pageRank'
       })`,
@@ -137,7 +128,6 @@ export async function runSleepCycle(): Promise<{
       payload: {
         nodeCount,
         episodicNodeCount: episodicScores.length,
-        semanticNodeCount: semanticScoreCount,
         threshold,
         nodesToPrune: nodesToPrune.length,
       },
@@ -148,7 +138,7 @@ export async function runSleepCycle(): Promise<{
     // ------------------------------------------------------------------
     await session.run(
       `CALL gds.louvain.write($graphName, {
-        relationshipWeightProperty: 'weight',
+        relationshipWeightProperty: 'combinedWeight',
         writeProperty: 'communityId'
       })`,
       { graphName }
@@ -178,28 +168,19 @@ export async function runSleepCycle(): Promise<{
       if (nodeIds.length < MIN_COMMUNITY_SIZE) continue;
 
       const semanticContextResult = await session.run(
-        `MATCH (e:EpisodicNode)-[r]->(s:SemanticNode)
+        `MATCH (e:EpisodicNode)
          WHERE e.communityId = $communityId AND NOT e.nodeId IN $pruned
-         RETURN collect(DISTINCT {
-                  entityId: s.entityId,
-                  entityType: s.entityType,
-                  canonicalName: s.canonicalName,
-                  mentionCount: coalesce(s.mentionCount, 0)
-                }) AS semanticEntities,
-                collect(DISTINCT {
-                  relationshipType: type(r),
-                  entityType: s.entityType,
-                  canonicalName: s.canonicalName,
-                  confidence: coalesce(r.confidence, 0.0),
-                  relationshipHint: r.relationshipHint
-                }) AS semanticRelations`,
+         RETURN collect(coalesce(e.semanticPayloadJson, '[]')) AS semanticPayloads`,
         { communityId, pruned: nodesToPrune }
       );
       const semanticContext = semanticContextResult.records[0];
-      const semanticEntities = ((semanticContext?.get("semanticEntities") as SemanticCommunityEntity[] | null) ?? [])
-        .filter((entity): entity is SemanticCommunityEntity => Boolean(entity?.entityId && entity?.canonicalName));
-      const semanticRelations = ((semanticContext?.get("semanticRelations") as SemanticCommunityRelation[] | null) ?? [])
-        .filter((relation): relation is SemanticCommunityRelation => Boolean(relation?.relationshipType && relation?.canonicalName));
+      const semanticPayloads =
+        ((semanticContext?.get("semanticPayloads") as string[] | null) ?? []).map((payload) =>
+          parseStoredSemanticEntities(payload)
+        );
+      const { semanticEntities, semanticRelations } = buildCommunitySemanticContext(
+        semanticPayloads.flat()
+      );
 
       const distilledFact = await provider.generate(
         buildDistillationPrompt(contents, semanticEntities, semanticRelations)
@@ -235,11 +216,6 @@ export async function runSleepCycle(): Promise<{
         { ids: nodesToPrune }
       );
     }
-    await session.run(
-      `MATCH (s:SemanticNode)
-       WHERE NOT (:EpisodicNode)--(s)
-       DETACH DELETE s`
-    );
     await markJobRunning(jobId, "cleanup", 95);
 
     // ------------------------------------------------------------------
@@ -369,4 +345,43 @@ function normalizeNeo4jNumber(value: unknown) {
   }
 
   return Number(value ?? 0);
+}
+
+function buildCommunitySemanticContext(entities: StoredSemanticEntity[]) {
+  const mergedEntities = new Map<string, SemanticCommunityEntity>();
+  const mergedRelations = new Map<string, SemanticCommunityRelation>();
+
+  for (const entity of entities) {
+    const entityKey = entity.entityId;
+    const relationKey = `${entity.relationshipType}:${entity.entityId}`;
+    const existingEntity = mergedEntities.get(entityKey);
+    const nextMentionCount = (existingEntity?.mentionCount ?? 0) + Math.max(entity.mentionCount, 1);
+
+    mergedEntities.set(entityKey, {
+      entityId: entity.entityId,
+      entityType: entity.entityType,
+      canonicalName:
+        existingEntity && existingEntity.canonicalName.length > entity.canonicalName.length
+          ? existingEntity.canonicalName
+          : entity.canonicalName,
+      mentionCount: nextMentionCount,
+    });
+
+    const existingRelation = mergedRelations.get(relationKey);
+    mergedRelations.set(relationKey, {
+      relationshipType: entity.relationshipType,
+      entityType: entity.entityType,
+      canonicalName:
+        existingRelation && existingRelation.canonicalName.length > entity.canonicalName.length
+          ? existingRelation.canonicalName
+          : entity.canonicalName,
+      confidence: Math.max(existingRelation?.confidence ?? 0, entity.confidence),
+      relationshipHint: existingRelation?.relationshipHint ?? entity.relationshipHint,
+    });
+  }
+
+  return {
+    semanticEntities: Array.from(mergedEntities.values()),
+    semanticRelations: Array.from(mergedRelations.values()),
+  };
 }

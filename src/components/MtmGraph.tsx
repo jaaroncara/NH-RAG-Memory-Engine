@@ -9,8 +9,10 @@ type RenderLink = GraphSnapshot["edges"][number] & d3.SimulationLinkDatum<Render
 type InspectorNeighbor = GraphSnapshot["nodes"][number] & {
   weight: number;
   edgeType: GraphSnapshot["edges"][number]["type"];
-  confidence?: number;
-  relationshipHint?: string;
+  cosineWeight: number;
+  semanticOverlapWeight: number;
+  sharedEntityCount: number;
+  sharedEntities: GraphSnapshot["edges"][number]["sharedEntities"];
 };
 type InspectorNode = GraphSnapshot["nodes"][number] & {
   degree: number;
@@ -380,13 +382,12 @@ export default function MtmGraph({ graph }: MtmGraphProps) {
 
       <div className="pointer-events-none absolute left-4 top-16 z-10 flex max-w-[70%] flex-wrap gap-2">
         <LegendPill label="Episodic Nodes" className="border-sky-300/30 bg-sky-400/10 text-sky-100" />
-        <LegendPill label="Semantic Nodes" className="border-amber-300/30 bg-amber-400/10 text-amber-100" />
         <LegendPill label="Similarity Edges" className="border-sky-300/20 bg-sky-500/10 text-sky-100" />
-        <LegendPill label="Entity Edges" className="border-amber-300/20 bg-amber-500/10 text-amber-100" />
+        <LegendPill label="Overlap-Enriched Edges" className="border-amber-300/20 bg-amber-500/10 text-amber-100" />
       </div>
 
       <div className="pointer-events-none absolute bottom-4 left-4 z-10 rounded-full border border-white/10 bg-black/65 px-3 py-1.5 text-[11px] uppercase tracking-[0.24em] text-neutral-400 backdrop-blur">
-        Drag canvas to pan. Scroll to zoom. Click nodes to inspect episodic clusters and extracted entity links.
+        Drag canvas to pan. Scroll to zoom. Click nodes to inspect episodic clusters, extracted semantic anchors, and shared overlap.
       </div>
 
       <div className="absolute inset-x-4 bottom-4 z-10 md:inset-x-auto md:right-4 md:w-[360px]">
@@ -413,7 +414,7 @@ function NodeInspector({
         <div>
           <p className="text-[11px] uppercase tracking-[0.24em] text-neutral-400">Node Inspector</p>
           <p className="mt-1 text-sm text-neutral-200">
-            {selectedNode ? "Inspect content, entity metadata, salience, and strongest local links." : "Select a node to inspect its memory payload and semantic connections."}
+            {selectedNode ? "Inspect content, extracted semantic anchors, salience, and strongest local overlap links." : "Select a node to inspect its memory payload, semantic anchors, and shared overlap."}
           </p>
         </div>
         {selectedNode ? (
@@ -436,33 +437,55 @@ function NodeInspector({
               <span className="rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1 text-[11px] uppercase tracking-[0.22em] text-neutral-300">
                 {selectedNode.type}
               </span>
-              {selectedNode.type === "semantic" && selectedNode.entityType ? (
-                <span className="rounded-full border border-amber-300/20 bg-amber-500/10 px-2.5 py-1 text-[11px] uppercase tracking-[0.22em] text-amber-100">
-                  {selectedNode.entityType}
-                </span>
-              ) : (
-                <span className="rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1 text-[11px] uppercase tracking-[0.22em] text-neutral-300">
-                  Community {selectedNode.communityId ?? "-"}
-                </span>
-              )}
+              <span className="rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1 text-[11px] uppercase tracking-[0.22em] text-neutral-300">
+                Community {selectedNode.communityId ?? "-"}
+              </span>
+              <span className="rounded-full border border-amber-300/20 bg-amber-500/10 px-2.5 py-1 text-[11px] uppercase tracking-[0.22em] text-amber-100">
+                {selectedNode.semanticEntityCount} anchors
+              </span>
             </div>
             <p className="mt-3 break-all font-mono text-[11px] text-neutral-500">{selectedNode.nodeId}</p>
-            <p className="mt-2 text-sm leading-6 text-neutral-100">{selectedNode.type === "semantic" ? selectedNode.displayLabel : selectedNode.content}</p>
-            {selectedNode.type === "semantic" && selectedNode.aliases && selectedNode.aliases.length > 1 ? (
-              <p className="mt-3 text-xs leading-5 text-neutral-400">
-                Aliases: {selectedNode.aliases.join(", ")}
-              </p>
-            ) : null}
+            <p className="mt-2 text-sm leading-6 text-neutral-100">{selectedNode.content}</p>
           </div>
 
           <div className="grid grid-cols-2 gap-2 text-sm text-neutral-300">
-            <MetricPill
-              label={selectedNode.type === "semantic" ? "Mentions" : "PageRank"}
-              value={selectedNode.type === "semantic" ? String(selectedNode.mentionCount ?? 0) : formatDecimal(selectedNode.pageRank ?? 0, 3)}
-            />
+            <MetricPill label="PageRank" value={formatDecimal(selectedNode.pageRank ?? 0, 3)} />
             <MetricPill label="Connections" value={String(selectedNode.degree)} />
             <MetricPill label="Weighted Degree" value={formatDecimal(selectedNode.weightedDegree, 2)} />
-            <MetricPill label={selectedNode.type === "semantic" ? "Updated" : "Consolidated"} value={formatTimestamp(selectedNode.consolidatedAt)} />
+            <MetricPill label="Anchors" value={String(selectedNode.semanticEntityCount)} />
+            <MetricPill label="Consolidated" value={formatTimestamp(selectedNode.consolidatedAt)} />
+          </div>
+
+          <div>
+            <p className="text-[11px] uppercase tracking-[0.24em] text-neutral-500">Extracted Semantic Anchors</p>
+            {selectedNode.semanticEntities.length > 0 ? (
+              <div className="mt-2 space-y-2">
+                {selectedNode.semanticEntities.slice(0, 6).map((entity) => (
+                  <div
+                    key={`${selectedNode.nodeId}:${entity.entityId}`}
+                    className="rounded-[14px] border border-white/10 bg-white/[0.04] px-3 py-2.5"
+                  >
+                    <div className="flex flex-wrap items-center gap-2">
+                      <p className="text-sm text-neutral-100">{entity.canonicalName}</p>
+                      <span className="rounded-full border border-amber-300/20 bg-amber-500/10 px-2 py-0.5 text-[10px] uppercase tracking-[0.22em] text-amber-100">
+                        {entity.entityType}
+                      </span>
+                      <span className="rounded-full border border-white/10 bg-black/35 px-2 py-0.5 text-[10px] uppercase tracking-[0.22em] text-neutral-300">
+                        {formatEdgeType(entity.relationshipType)}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-[11px] text-neutral-500">
+                      Confidence {formatDecimal(entity.confidence, 2)}
+                    </p>
+                    {entity.relationshipHint ? (
+                      <p className="mt-1 text-[11px] leading-5 text-neutral-500">{entity.relationshipHint}</p>
+                    ) : null}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="mt-2 text-sm text-neutral-500">No extracted semantic anchors were stored on this episodic node.</p>
+            )}
           </div>
 
           <div>
@@ -480,16 +503,21 @@ function NodeInspector({
                       <div className="flex flex-wrap items-center gap-2">
                         <p className="text-sm text-neutral-100">{truncateContent(neighbor.displayLabel, 64)}</p>
                         <span className="rounded-full border border-white/10 bg-black/35 px-2 py-0.5 text-[10px] uppercase tracking-[0.22em] text-neutral-300">
-                          {formatEdgeType(neighbor.edgeType)}
+                          Similarity
                         </span>
                       </div>
                       <p className="mt-1 font-mono text-[11px] text-neutral-500">{truncateContent(neighbor.nodeId, 28)}</p>
-                      {neighbor.relationshipHint ? (
-                        <p className="mt-1 text-[11px] leading-5 text-neutral-500">{neighbor.relationshipHint}</p>
+                      {neighbor.sharedEntityCount > 0 ? (
+                        <p className="mt-1 text-[11px] leading-5 text-neutral-500">
+                          Shared anchors: {neighbor.sharedEntities.slice(0, 4).map((entity) => entity.canonicalName).join(", ")}
+                        </p>
                       ) : null}
+                      <p className="mt-1 text-[11px] leading-5 text-neutral-500">
+                        Cosine {formatDecimal(neighbor.cosineWeight, 2)} • Semantic overlap {formatDecimal(neighbor.semanticOverlapWeight, 2)}
+                      </p>
                     </div>
                     <span className="rounded-full border border-white/10 bg-black/35 px-2 py-1 font-mono text-[11px] text-neutral-300">
-                      {neighbor.confidence !== undefined ? formatDecimal(neighbor.confidence, 2) : formatDecimal(neighbor.weight, 2)}
+                      {formatDecimal(neighbor.weight, 2)}
                     </span>
                   </button>
                 ))}
@@ -544,15 +572,19 @@ function buildNodeInspectorData(graph: GraphSnapshot) {
       ...targetNode,
       weight: edge.weight,
       edgeType: edge.type,
-      confidence: edge.confidence,
-      relationshipHint: edge.relationshipHint,
+      cosineWeight: edge.cosineWeight,
+      semanticOverlapWeight: edge.semanticOverlapWeight,
+      sharedEntityCount: edge.sharedEntityCount,
+      sharedEntities: edge.sharedEntities,
     });
     target.neighbors.push({
       ...sourceNode,
       weight: edge.weight,
       edgeType: edge.type,
-      confidence: edge.confidence,
-      relationshipHint: edge.relationshipHint,
+      cosineWeight: edge.cosineWeight,
+      semanticOverlapWeight: edge.semanticOverlapWeight,
+      sharedEntityCount: edge.sharedEntityCount,
+      sharedEntities: edge.sharedEntities,
     });
   });
 
@@ -634,10 +666,7 @@ function transformsAreClose(left: d3.ZoomTransform, right: d3.ZoomTransform) {
   return Math.abs(left.k - right.k) < 0.001 && Math.abs(left.x - right.x) < 0.5 && Math.abs(left.y - right.y) < 0.5;
 }
 
-function getNodeRadius(node: { type: "episodic" | "semantic"; pageRank?: number; mentionCount?: number }) {
-  if (node.type === "semantic") {
-    return 10 + Math.min(8, (node.mentionCount ?? 1) * 0.65);
-  }
+function getNodeRadius(node: { pageRank?: number }) {
   return 12 + Math.max(0, (node.pageRank ?? 0) * 16);
 }
 
@@ -657,56 +686,36 @@ function formatDecimal(value: number, digits: number) {
 }
 
 function getNodeFill(node: GraphSnapshot["nodes"][number], communityColor: d3.ScaleOrdinal<string, string>) {
-  if (node.type === "semantic") {
-    return semanticNodeColor[node.entityType ?? "topic"];
-  }
-
   return communityColor(String(node.communityId ?? -1));
 }
 
-function getNodeStroke(node: GraphSnapshot["nodes"][number]) {
-  if (node.type === "semantic") {
-    return "rgba(252, 211, 77, 0.62)";
-  }
-
+function getNodeStroke(_node: GraphSnapshot["nodes"][number]) {
   return "rgba(226, 232, 240, 0.28)";
 }
 
 function getBaseLinkStroke(link: GraphSnapshot["edges"][number]) {
-  return link.type === "SIMILAR_TO" ? "rgba(125, 211, 252, 0.22)" : "rgba(251, 191, 36, 0.4)";
+  return link.sharedEntityCount > 0 ? "rgba(251, 191, 36, 0.42)" : "rgba(125, 211, 252, 0.22)";
 }
 
 function getHighlightedLinkStroke(link: GraphSnapshot["edges"][number]) {
-  return link.type === "SIMILAR_TO" ? "rgba(125, 211, 252, 0.82)" : "rgba(251, 191, 36, 0.88)";
+  return link.sharedEntityCount > 0 ? "rgba(251, 191, 36, 0.88)" : "rgba(125, 211, 252, 0.82)";
 }
 
 function getLinkWidth(link: GraphSnapshot["edges"][number]) {
-  if (link.type === "SIMILAR_TO") {
-    return 0.8 + link.weight * 2.2;
-  }
-
-  return 1.3 + (link.confidence ?? link.weight) * 1.8;
+  return 0.8 + link.cosineWeight * 1.5 + link.semanticOverlapWeight * 1.4;
 }
 
 function getLinkDashArray(link: GraphSnapshot["edges"][number]) {
-  return link.type === "SIMILAR_TO" ? undefined : "6 5";
+  return link.sharedEntityCount > 0 ? "6 4" : undefined;
 }
 
-function formatEdgeType(value: GraphSnapshot["edges"][number]["type"]) {
+function formatEdgeType(value: string) {
   return value.toLowerCase().replace(/_/g, " ");
 }
 
 function LegendPill({ label, className }: { label: string; className: string }) {
   return <span className={`rounded-full border px-3 py-1 text-[10px] uppercase tracking-[0.24em] ${className}`}>{label}</span>;
 }
-
-const semanticNodeColor: Record<NonNullable<GraphSnapshot["nodes"][number]["entityType"]>, string> = {
-  person: "rgba(244, 114, 182, 0.78)",
-  location: "rgba(74, 222, 128, 0.78)",
-  project: "rgba(168, 85, 247, 0.78)",
-  tool: "rgba(249, 115, 22, 0.78)",
-  topic: "rgba(250, 204, 21, 0.78)",
-};
 
 function GraphControlButton({
   children,

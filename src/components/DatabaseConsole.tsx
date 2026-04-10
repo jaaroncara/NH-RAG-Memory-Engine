@@ -51,9 +51,9 @@ export default function DatabaseConsole() {
       edgeCount: 0,
       communityCount: 0,
       episodicNodeCount: 0,
-      semanticNodeCount: 0,
+      annotatedNodeCount: 0,
       similarityEdgeCount: 0,
-      semanticEdgeCount: 0,
+      overlapEdgeCount: 0,
     },
   });
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
@@ -597,9 +597,9 @@ function MtmView({ graph }: { graph: GraphSnapshot }) {
       <div className="grid gap-4 md:grid-cols-5">
         {[
           { label: "Nodes", value: graph.stats.nodeCount },
-          { label: "Semantic Nodes", value: graph.stats.semanticNodeCount },
+          { label: "Annotated Nodes", value: graph.stats.annotatedNodeCount },
           { label: "Edges", value: graph.stats.edgeCount },
-          { label: "Entity Edges", value: graph.stats.semanticEdgeCount },
+          { label: "Overlap Edges", value: graph.stats.overlapEdgeCount },
           { label: "Communities", value: graph.stats.communityCount },
         ].map((card) => (
           <Card key={card.label} className="border-white/10 bg-white/[0.04] text-neutral-100 shadow-none">
@@ -613,7 +613,7 @@ function MtmView({ graph }: { graph: GraphSnapshot }) {
       <Card className="border-white/10 bg-white/[0.04] text-neutral-100 shadow-none">
         <CardHeader>
           <CardTitle>Medium-Term Memory Network</CardTitle>
-          <CardDescription className="text-neutral-400">A bounded subgraph of recent episodic nodes enriched with extracted semantic entities, typed entity edges, similarity links, and community coloring. The graph can be panned, zoomed, and expanded into fullscreen for inspection.</CardDescription>
+          <CardDescription className="text-neutral-400">A bounded episodic graph enriched by extracted semantic attributes on nodes and shared semantic overlap on similarity edges. The graph can be panned, zoomed, and expanded into fullscreen for inspection.</CardDescription>
         </CardHeader>
         <CardContent className="pt-0">
           <MtmGraph graph={graph} />

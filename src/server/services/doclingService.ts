@@ -18,6 +18,8 @@ export interface ParsedDocument {
 const DOCLING_SERVICE_URL = process.env.DOCLING_SERVICE_URL || "http://localhost:8081/parse";
 
 export async function parseDocumentWithDocling(file: Express.Multer.File): Promise<ParsedDocument> {
+  let doclingFailure: string | null = null;
+
   try {
     const form = new FormData();
     form.append(
@@ -34,11 +36,23 @@ export async function parseDocumentWithDocling(file: Express.Multer.File): Promi
     if (response.ok) {
       return (await response.json()) as ParsedDocument;
     }
-  } catch {
-    // Fall through to local fallback parsing.
+
+    doclingFailure = await describeDoclingFailure(response);
+  } catch (error) {
+    doclingFailure = error instanceof Error ? error.message : String(error);
   }
 
-  return parseDocumentLocally(file);
+  try {
+    return parseDocumentLocally(file);
+  } catch (fallbackError) {
+    if (doclingFailure) {
+      throw new Error(
+        `Docling parse failed for ${file.originalname}: ${doclingFailure}`
+      );
+    }
+
+    throw fallbackError;
+  }
 }
 
 function parseDocumentLocally(file: Express.Multer.File): ParsedDocument {
@@ -152,4 +166,35 @@ function splitText(text: string, maxChars = 1200): string[] {
 
 function estimateTokens(text: string): number {
   return Math.max(1, Math.ceil(text.length / 4));
+}
+
+async function describeDoclingFailure(response: Response): Promise<string> {
+  const statusLine = `${response.status} ${response.statusText}`.trim();
+
+  try {
+    const payload = (await response.json()) as { detail?: unknown; error?: unknown };
+    const detail =
+      typeof payload.detail === "string"
+        ? payload.detail
+        : typeof payload.error === "string"
+          ? payload.error
+          : null;
+
+    if (detail) {
+      return `${statusLine}: ${detail}`;
+    }
+  } catch {
+    // Fall through to plain-text body parsing.
+  }
+
+  try {
+    const body = (await response.text()).trim();
+    if (body) {
+      return `${statusLine}: ${body.slice(0, 400)}`;
+    }
+  } catch {
+    // Ignore body read errors and use the status line alone.
+  }
+
+  return statusLine;
 }
