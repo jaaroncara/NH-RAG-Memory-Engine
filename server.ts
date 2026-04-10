@@ -20,6 +20,7 @@ import consolidationRoutes from "./src/server/routes/consolidation.js";
 import documentRoutes from "./src/server/routes/documents.js";
 import jobRoutes from "./src/server/routes/jobs.js";
 import metricsRoutes from "./src/server/routes/metrics.js";
+import queryRoutes from "./src/server/routes/query.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -55,6 +56,7 @@ async function startServer() {
   app.use("/api/documents", documentRoutes);
   app.use("/api/jobs", jobRoutes);
   app.use("/api/metrics", metricsRoutes);
+  app.use("/api/query", queryRoutes);
 
   app.get("/api/health", async (req, res) => {
     const health: Record<string, string> = {};

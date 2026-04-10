@@ -22,12 +22,14 @@ import { Input } from "../../components/ui/input";
 import { ScrollArea } from "../../components/ui/scroll-area";
 import { MemoryService, type DocumentDetail, type DocumentRecord, type EpisodicMemory, type GraphSnapshot, type JobRecord, type OverviewMetrics, type PipelineEvent, type SemanticFact } from "../lib/memoryService";
 import MtmGraph from "./MtmGraph";
+import QueryConsoleView from "./QueryConsoleView";
 
 const navItems = [
   { to: "/", label: "Overview", icon: Activity },
   { to: "/documents", label: "Document Loader", icon: HardDriveUpload },
   { to: "/stm", label: "STM Base", icon: Database },
   { to: "/mtm", label: "MTM Network", icon: Orbit },
+  { to: "/console", label: "Data Console", icon: ServerCog },
   { to: "/ltm", label: "LTM Store", icon: Sparkles },
   { to: "/jobs", label: "Logs", icon: GitBranch },
 ];
@@ -251,6 +253,10 @@ export default function DatabaseConsole() {
                   openDocument={openDocument}
                 />
               }
+            />
+            <Route
+              path="/console"
+              element={<QueryConsoleView onDataMutation={refreshAll} />}
             />
             <Route
               path="/stm"

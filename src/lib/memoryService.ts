@@ -155,6 +155,33 @@ export interface OverviewMetrics {
   };
 }
 
+export type QueryEngine = "sql" | "cypher";
+
+export interface QueryInspectionResult {
+  engine: QueryEngine;
+  mode: "inspect";
+  query: string;
+  normalizedQuery: string;
+  statementType: string;
+  isReadOnly: boolean;
+  isDestructive: boolean;
+  warnings: string[];
+  targets: string[];
+  timeoutMs: number;
+  maxRows: number;
+}
+
+export interface QueryExecutionResult extends Omit<QueryInspectionResult, "mode"> {
+  mode: "execute";
+  rowCount: number;
+  executionTimeMs: number;
+  columns: string[];
+  rows: Array<Record<string, unknown>>;
+  truncated: boolean;
+  summary: string;
+  counters?: Record<string, number>;
+}
+
 const API = "/api";
 
 async function json<T>(res: Response): Promise<T> {
@@ -166,6 +193,42 @@ async function json<T>(res: Response): Promise<T> {
 }
 
 export class MemoryService {
+  static async inspectSqlQuery(query: string, options?: { timeoutMs?: number; maxRows?: number }): Promise<QueryInspectionResult> {
+    const res = await fetch(`${API}/query/sql/inspect`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, ...options }),
+    });
+    return json<QueryInspectionResult>(res);
+  }
+
+  static async executeSqlQuery(query: string, options?: { timeoutMs?: number; maxRows?: number }): Promise<QueryExecutionResult> {
+    const res = await fetch(`${API}/query/sql/execute`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, ...options }),
+    });
+    return json<QueryExecutionResult>(res);
+  }
+
+  static async inspectCypherQuery(query: string, options?: { timeoutMs?: number; maxRows?: number }): Promise<QueryInspectionResult> {
+    const res = await fetch(`${API}/query/cypher/inspect`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, ...options }),
+    });
+    return json<QueryInspectionResult>(res);
+  }
+
+  static async executeCypherQuery(query: string, options?: { timeoutMs?: number; maxRows?: number }): Promise<QueryExecutionResult> {
+    const res = await fetch(`${API}/query/cypher/execute`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query, ...options }),
+    });
+    return json<QueryExecutionResult>(res);
+  }
+
   static async listDocuments(): Promise<DocumentRecord[]> {
     const res = await fetch(`${API}/documents`);
     return json<DocumentRecord[]>(res);
