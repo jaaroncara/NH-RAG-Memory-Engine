@@ -31,24 +31,56 @@ interface SemanticCommunityRelation {
   relationshipHint?: string | null;
 }
 
-export async function runSleepCycle(): Promise<{
-  pruned: number;
-  consolidated: number;
-} | null> {
-  const driver = getNeo4jDriver();
-  const session = driver.session();
+export interface SleepCycleLaunchResult {
+  jobId: string;
+  status: "queued";
+  stage: "project_graph";
+  progress: 0;
+}
+
+const SLEEP_CYCLE_PROGRESS = {
+  projectGraphStart: 8,
+  rankNodesStart: 24,
+  rankNodesComplete: 42,
+  clusterCommunities: 55,
+  distillStart: 62,
+  distillComplete: 92,
+  cleanup: 97,
+  completed: 100,
+} as const;
+
+export async function runSleepCycle(): Promise<SleepCycleLaunchResult> {
   const jobId = await createJob({
     jobType: "sleep_cycle",
     stage: "project_graph",
     metadata: {},
   });
 
+  queueMicrotask(() => {
+    void processSleepCycleJob(jobId);
+  });
+
+  return {
+    jobId,
+    status: "queued",
+    stage: "project_graph",
+    progress: 0,
+  };
+}
+
+async function processSleepCycleJob(jobId: string): Promise<void> {
+  const driver = getNeo4jDriver();
+  const session = driver.session();
+
   try {
-    await markJobRunning(jobId, "project_graph", 5);
+    await markJobRunning(jobId, "project_graph", SLEEP_CYCLE_PROGRESS.projectGraphStart);
     await recordPipelineEvent({
       jobId,
       stage: "project_graph",
       message: "Sleep cycle started",
+      payload: {
+        progress: SLEEP_CYCLE_PROGRESS.projectGraphStart,
+      },
     });
 
     // Check node count
@@ -62,8 +94,13 @@ export async function runSleepCycle(): Promise<{
         jobId,
         stage: "completed",
         message: "Sleep cycle skipped because there are fewer than two MTM nodes",
+        payload: {
+          progress: SLEEP_CYCLE_PROGRESS.completed,
+          pruned: 0,
+          consolidated: 0,
+        },
       });
-      return null;
+      return;
     }
 
     // ------------------------------------------------------------------
@@ -79,7 +116,16 @@ export async function runSleepCycle(): Promise<{
         relationshipProjection: SLEEP_CYCLE_RELATIONSHIP_PROJECTION,
       }
     );
-    await markJobRunning(jobId, "rank_nodes", 25);
+    await markJobRunning(jobId, "rank_nodes", SLEEP_CYCLE_PROGRESS.rankNodesStart);
+    await recordPipelineEvent({
+      jobId,
+      stage: "project_graph",
+      message: "Projected the MTM graph for sleep-cycle analytics",
+      payload: {
+        progress: SLEEP_CYCLE_PROGRESS.rankNodesStart,
+        nodeCount,
+      },
+    });
 
     // ------------------------------------------------------------------
     // 2. PageRank (Synaptic Pruning)
@@ -121,11 +167,13 @@ export async function runSleepCycle(): Promise<{
     const nodesToPrune = episodicScores
       .filter((s) => s.score < threshold)
       .map((s) => s.graphNodeId);
+    await markJobRunning(jobId, "rank_nodes", SLEEP_CYCLE_PROGRESS.rankNodesComplete);
     await recordPipelineEvent({
       jobId,
       stage: "rank_nodes",
       message: "Calculated PageRank scores",
       payload: {
+        progress: SLEEP_CYCLE_PROGRESS.rankNodesComplete,
         nodeCount,
         episodicNodeCount: episodicScores.length,
         threshold,
@@ -143,7 +191,7 @@ export async function runSleepCycle(): Promise<{
       })`,
       { graphName }
     );
-    await markJobRunning(jobId, "cluster_communities", 50);
+    await markJobRunning(jobId, "cluster_communities", SLEEP_CYCLE_PROGRESS.clusterCommunities);
 
     // Read communities (excluding pruned nodes)
     const commResult = await session.run(
@@ -152,20 +200,48 @@ export async function runSleepCycle(): Promise<{
        RETURN n.communityId AS cid, collect(n.nodeId) AS nodeIds, collect(n.content) AS contents`,
       { pruned: nodesToPrune }
     );
+    const eligibleCommunities = commResult.records.filter(
+      (record) => ((record.get("nodeIds") as string[]) ?? []).length >= MIN_COMMUNITY_SIZE
+    );
+    await recordPipelineEvent({
+      jobId,
+      stage: "cluster_communities",
+      message: "Clustered MTM nodes into candidate communities",
+      payload: {
+        progress: SLEEP_CYCLE_PROGRESS.clusterCommunities,
+        candidateCommunities: commResult.records.length,
+        eligibleCommunities: eligibleCommunities.length,
+      },
+    });
 
     // ------------------------------------------------------------------
     // 4. Distill surviving communities to LTM
     // ------------------------------------------------------------------
     const provider = getProvider();
     let consolidatedCount = 0;
-    await markJobRunning(jobId, "distill_facts", 70);
+    await markJobRunning(jobId, "distill_facts", SLEEP_CYCLE_PROGRESS.distillStart);
+    await recordPipelineEvent({
+      jobId,
+      stage: "distill_facts",
+      message:
+        eligibleCommunities.length > 0
+          ? `Preparing to distill ${eligibleCommunities.length} MTM communities into LTM facts`
+          : "No MTM communities met the minimum size for LTM distillation",
+      payload: {
+        progress: eligibleCommunities.length > 0 ? SLEEP_CYCLE_PROGRESS.distillStart : SLEEP_CYCLE_PROGRESS.distillComplete,
+        eligibleCommunities: eligibleCommunities.length,
+      },
+    });
+    if (eligibleCommunities.length === 0) {
+      await markJobRunning(jobId, "distill_facts", SLEEP_CYCLE_PROGRESS.distillComplete);
+    }
 
-    for (const record of commResult.records) {
+    let processedCommunities = 0;
+    let lastDistillEventPercent = -1;
+    for (const record of eligibleCommunities) {
       const communityId = record.get("cid");
       const nodeIds = record.get("nodeIds") as string[];
       const contents = record.get("contents") as string[];
-
-      if (nodeIds.length < MIN_COMMUNITY_SIZE) continue;
 
       const semanticContextResult = await session.run(
         `MATCH (e:EpisodicNode)
@@ -205,6 +281,45 @@ export async function runSleepCycle(): Promise<{
         });
         consolidatedCount++;
       }
+
+      processedCommunities += 1;
+      const progress = interpolateProgress(
+        SLEEP_CYCLE_PROGRESS.distillStart,
+        SLEEP_CYCLE_PROGRESS.distillComplete,
+        processedCommunities,
+        eligibleCommunities.length
+      );
+      await markJobRunning(jobId, "distill_facts", progress);
+
+      const currentPercent = Math.floor((processedCommunities / Math.max(eligibleCommunities.length, 1)) * 100);
+      if (processedCommunities === eligibleCommunities.length || processedCommunities === 1 || currentPercent >= lastDistillEventPercent + 20) {
+        lastDistillEventPercent = currentPercent;
+        await recordPipelineEvent({
+          jobId,
+          stage: "distill_facts",
+          message: `Distilled ${processedCommunities} of ${eligibleCommunities.length} communities into LTM candidates`,
+          payload: {
+            progress,
+            processedCommunities,
+            totalCommunities: eligibleCommunities.length,
+            consolidated: consolidatedCount,
+          },
+        });
+      }
+    }
+
+    if (eligibleCommunities.length > 0) {
+      await markJobRunning(jobId, "distill_facts", SLEEP_CYCLE_PROGRESS.distillComplete);
+      await recordPipelineEvent({
+        jobId,
+        stage: "distill_facts",
+        message: "Finished consolidating MTM communities into LTM facts",
+        payload: {
+          progress: SLEEP_CYCLE_PROGRESS.distillComplete,
+          totalCommunities: eligibleCommunities.length,
+          consolidated: consolidatedCount,
+        },
+      });
     }
 
     // ------------------------------------------------------------------
@@ -216,7 +331,17 @@ export async function runSleepCycle(): Promise<{
         { ids: nodesToPrune }
       );
     }
-    await markJobRunning(jobId, "cleanup", 95);
+    await markJobRunning(jobId, "cleanup", SLEEP_CYCLE_PROGRESS.cleanup);
+    await recordPipelineEvent({
+      jobId,
+      stage: "cleanup",
+      message: "Pruned low-salience MTM nodes and finalized graph cleanup",
+      payload: {
+        progress: SLEEP_CYCLE_PROGRESS.cleanup,
+        pruned: nodesToPrune.length,
+        consolidated: consolidatedCount,
+      },
+    });
 
     // ------------------------------------------------------------------
     // 6. Drop the projected graph
@@ -227,14 +352,16 @@ export async function runSleepCycle(): Promise<{
       jobId,
       stage: "cleanup",
       message: "Sleep cycle completed",
-      payload: { pruned: nodesToPrune.length, consolidated: consolidatedCount },
+      payload: {
+        progress: SLEEP_CYCLE_PROGRESS.completed,
+        pruned: nodesToPrune.length,
+        consolidated: consolidatedCount,
+      },
     });
     await markJobCompleted(jobId, "completed", 100, {
       pruned: nodesToPrune.length,
       consolidated: consolidatedCount,
     });
-
-    return { pruned: nodesToPrune.length, consolidated: consolidatedCount };
   } catch (error) {
     await markJobFailed(jobId, "failed", error instanceof Error ? error.message : String(error));
     await recordPipelineEvent({
@@ -250,6 +377,15 @@ export async function runSleepCycle(): Promise<{
   } finally {
     await session.close();
   }
+}
+
+function interpolateProgress(start: number, end: number, completedUnits: number, totalUnits: number) {
+  if (totalUnits <= 0) {
+    return end;
+  }
+
+  const ratio = Math.min(1, Math.max(0, completedUnits / totalUnits));
+  return Math.round(start + (end - start) * ratio);
 }
 
 function buildDistillationPrompt(

@@ -94,6 +94,13 @@ export interface JobRecord {
   updatedAt: string;
 }
 
+export interface SleepCycleLaunchResult {
+  jobId: string;
+  status: "queued";
+  stage: "project_graph";
+  progress: 0;
+}
+
 export interface PipelineEvent {
   eventId: string;
   jobId: string | null;
@@ -373,14 +380,11 @@ export class MemoryService {
   }
 
   // Sleep-Cycle
-  static async runSleepCycle(): Promise<{
-    pruned: number;
-    consolidated: number;
-  } | null> {
+  static async runSleepCycle(): Promise<SleepCycleLaunchResult> {
     const res = await fetch(`${API}/consolidation/sleep-cycle`, {
       method: "POST",
     });
-    return json<{ pruned: number; consolidated: number } | null>(res);
+    return json<SleepCycleLaunchResult>(res);
   }
 
   // LTM

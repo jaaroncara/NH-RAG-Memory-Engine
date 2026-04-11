@@ -4,6 +4,7 @@ import {
   Activity,
   AlertTriangle,
   ArrowUpRight,
+  ChevronDown,
   Database,
   FileStack,
   GitBranch,
@@ -53,6 +54,26 @@ const documentStageLabels: Record<string, string> = {
   refreshing_graph: "Refreshing MTM graph",
   completed: "Import completed",
   failed: "Import failed",
+};
+
+const sleepCycleSteps = [
+  { key: "project_graph", label: "Project Graph", stages: ["project_graph"] },
+  { key: "rank_cluster", label: "Score & Cluster", stages: ["rank_nodes", "cluster_communities"] },
+  { key: "distill_facts", label: "Distill to LTM", stages: ["distill_facts"] },
+  { key: "cleanup", label: "Cleanup", stages: ["cleanup", "completed"] },
+] as const;
+
+const STM_PAGE_SIZE = 20;
+const LTM_PAGE_SIZE = 8;
+
+const sleepCycleStageLabels: Record<string, string> = {
+  project_graph: "Projecting the MTM graph",
+  rank_nodes: "Ranking nodes for pruning",
+  cluster_communities: "Clustering MTM communities",
+  distill_facts: "Committing MTM to LTM",
+  cleanup: "Pruning nodes and closing the graph",
+  completed: "Sleep cycle completed",
+  failed: "Sleep cycle failed",
 };
 
 type DocumentStepState = "complete" | "current" | "pending" | "error";
@@ -205,6 +226,131 @@ function formatStatusTimestamp(value: string | null) {
   return new Date(value).toLocaleString();
 }
 
+function getTotalPages(total: number, pageSize: number) {
+  return Math.max(1, Math.ceil(total / pageSize));
+}
+
+function isSleepCycleJob(job: JobRecord) {
+  return job.jobType === "sleep_cycle";
+}
+
+function getSleepCycleStageLabel(stage: string) {
+  return sleepCycleStageLabels[stage] ?? stage.replace(/_/g, " ");
+}
+
+function getSleepCycleStepKey(stage: string) {
+  return sleepCycleSteps.find((step) => step.stages.includes(stage as never))?.key ?? stage;
+}
+
+function getSleepCycleStepState(job: JobRecord, stepKey: string): DocumentStepState {
+  if (job.status === "completed") {
+    return "complete";
+  }
+
+  const activeStep = getSleepCycleStepKey(job.stage);
+  const activeIndex = sleepCycleSteps.findIndex((step) => step.key === activeStep);
+  const stepIndex = sleepCycleSteps.findIndex((step) => step.key === stepKey);
+
+  if (job.status === "failed") {
+    if (activeStep === stepKey) {
+      return "error";
+    }
+
+    if (activeIndex >= 0 && stepIndex < activeIndex) {
+      return "complete";
+    }
+
+    return "pending";
+  }
+
+  if (job.status === "queued") {
+    return stepKey === "project_graph" ? "current" : "pending";
+  }
+
+  if (activeStep === stepKey) {
+    return "current";
+  }
+
+  if (activeIndex >= 0 && stepIndex < activeIndex) {
+    return "complete";
+  }
+
+  return "pending";
+}
+
+function getLatestEventForJob(jobId: string | null, events: PipelineEvent[]) {
+  if (!jobId) {
+    return null;
+  }
+
+  return events.find((event) => event.jobId === jobId) ?? null;
+}
+
+function getNumericPayloadValue(payload: Record<string, unknown>, key: string) {
+  const value = payload[key];
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value;
+  }
+
+  if (typeof value === "string") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+
+  return null;
+}
+
+function getSleepCycleSummaryLine(job: JobRecord, event: PipelineEvent | null) {
+  const payload = event?.payload ?? {};
+  const consolidated = getNumericPayloadValue(job.metadata, "consolidated") ?? getNumericPayloadValue(payload, "consolidated");
+  const pruned = getNumericPayloadValue(job.metadata, "pruned") ?? getNumericPayloadValue(payload, "pruned");
+  const processedCommunities = getNumericPayloadValue(payload, "processedCommunities");
+  const totalCommunities = getNumericPayloadValue(payload, "totalCommunities");
+  const eligibleCommunities = getNumericPayloadValue(payload, "eligibleCommunities");
+  const nodesToPrune = getNumericPayloadValue(payload, "nodesToPrune");
+
+  if (job.status === "completed") {
+    if (event?.message.includes("skipped")) {
+      return event.message;
+    }
+
+    return `${consolidated ?? 0} facts consolidated to LTM · ${pruned ?? 0} MTM nodes pruned`;
+  }
+
+  if (job.status === "failed") {
+    return job.errorMessage ?? event?.message ?? "Sleep cycle failed before completion";
+  }
+
+  if (processedCommunities !== null && totalCommunities !== null) {
+    return `${processedCommunities} of ${totalCommunities} communities distilled · ${consolidated ?? 0} facts committed`;
+  }
+
+  if (eligibleCommunities !== null) {
+    return `${eligibleCommunities} communities ready for LTM distillation`;
+  }
+
+  if (nodesToPrune !== null) {
+    return `${nodesToPrune} MTM nodes marked for pruning`;
+  }
+
+  return event?.message ?? `${job.progress}% through the current sleep cycle.`;
+}
+
+function getSleepCycleProgressValue(job: JobRecord, event: PipelineEvent | null) {
+  return getDocumentProgressValue({
+    jobId: job.jobId,
+    status: job.status,
+    stage: job.stage,
+    progress: job.progress,
+    errorMessage: job.errorMessage,
+    latestEventMessage: event?.message ?? null,
+    latestEventStage: event?.stage ?? null,
+    latestEventLevel: event?.level ?? null,
+    latestEventAt: event?.createdAt ?? null,
+    updatedAt: job.updatedAt,
+  });
+}
+
 export default function DatabaseConsole() {
   const [health, setHealth] = useState<Record<string, string>>({});
   const [metrics, setMetrics] = useState<OverviewMetrics | null>(null);
@@ -229,11 +375,18 @@ export default function DatabaseConsole() {
   });
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [stmQuery, setStmQuery] = useState("");
+  const [stmPage, setStmPage] = useState(1);
+  const [ltmPage, setLtmPage] = useState(1);
   const [isPending, startTransition] = useTransition();
   const location = useLocation();
   const navigate = useNavigate();
   const hasActiveImports = documents.some((document) => isDocumentImportActive(document.statusSummary.status));
+  const latestSleepCycleJob = jobs.find(isSleepCycleJob) ?? null;
+  const latestSleepCycleEvent = getLatestEventForJob(latestSleepCycleJob?.jobId ?? null, events);
+  const hasActiveSleepCycle = jobs.some((job) => isSleepCycleJob(job) && isDocumentImportActive(job.status));
+  const hasActivePipelineWork = hasActiveImports || hasActiveSleepCycle;
   const previousHasActiveImportsRef = useRef(false);
+  const previousHasActiveSleepCycleRef = useRef(false);
 
   const resolveFocusedDocumentId = (documentResult: DocumentRecord[], preferredDocumentId?: string) => {
     if (preferredDocumentId && documentResult.some((document) => document.documentId === preferredDocumentId)) {
@@ -274,16 +427,30 @@ export default function DatabaseConsole() {
   }, []);
 
   useEffect(() => {
-    if (!hasActiveImports) {
+    const totalPages = getTotalPages(stm.total, STM_PAGE_SIZE);
+    if (stmPage > totalPages) {
+      void refreshStm(totalPages, stmQuery);
+    }
+  }, [stm.total, stmPage, stmQuery]);
+
+  useEffect(() => {
+    const totalPages = getTotalPages(ltm.total, LTM_PAGE_SIZE);
+    if (ltmPage > totalPages) {
+      void refreshLtm(totalPages);
+    }
+  }, [ltm.total, ltmPage]);
+
+  useEffect(() => {
+    if (!hasActivePipelineWork) {
       return;
     }
 
     const intervalId = window.setInterval(() => {
       void refreshDocumentStatus({ silent: true });
-    }, 2500);
+    }, 1000);
 
     return () => window.clearInterval(intervalId);
-  }, [hasActiveImports, selectedDocument?.documentId]);
+  }, [hasActivePipelineWork, selectedDocument?.documentId]);
 
   useEffect(() => {
     if (previousHasActiveImportsRef.current && !hasActiveImports) {
@@ -292,6 +459,33 @@ export default function DatabaseConsole() {
 
     previousHasActiveImportsRef.current = hasActiveImports;
   }, [hasActiveImports, selectedDocument?.documentId]);
+
+  useEffect(() => {
+    if (previousHasActiveSleepCycleRef.current && !hasActiveSleepCycle && latestSleepCycleJob) {
+      if (latestSleepCycleJob.status === "completed") {
+        if (latestSleepCycleEvent?.message.includes("skipped")) {
+          toast.info(latestSleepCycleEvent.message);
+        } else {
+          const consolidated = getNumericPayloadValue(latestSleepCycleJob.metadata, "consolidated") ?? 0;
+          const pruned = getNumericPayloadValue(latestSleepCycleJob.metadata, "pruned") ?? 0;
+          toast.success(`Sleep-cycle distilled ${consolidated} facts and pruned ${pruned} nodes`);
+        }
+      } else if (latestSleepCycleJob.status === "failed") {
+        toast.error(latestSleepCycleJob.errorMessage ?? "Sleep-cycle failed");
+      }
+
+      void refreshAll(selectedDocument?.documentId);
+    }
+
+    previousHasActiveSleepCycleRef.current = hasActiveSleepCycle;
+  }, [
+    hasActiveSleepCycle,
+    latestSleepCycleJob?.jobId,
+    latestSleepCycleJob?.status,
+    latestSleepCycleJob?.errorMessage,
+    latestSleepCycleEvent?.message,
+    selectedDocument?.documentId,
+  ]);
 
   const refreshDocumentStatus = async (options?: { preferredDocumentId?: string; silent?: boolean }) => {
     try {
@@ -321,9 +515,9 @@ export default function DatabaseConsole() {
             MemoryService.testConnection(),
             MemoryService.getOverviewMetrics(),
             MemoryService.listDocuments(),
-            MemoryService.listStmEntries({ page: 1, pageSize: 20 }),
+            MemoryService.listStmEntries({ page: stmPage, pageSize: STM_PAGE_SIZE, query: stmQuery || undefined }),
             MemoryService.getGraph(),
-            MemoryService.listLtmFacts(1, 20),
+            MemoryService.listLtmFacts(ltmPage, LTM_PAGE_SIZE),
             MemoryService.listJobs(50),
             MemoryService.listPipelineEvents({ limit: 50 }),
           ]);
@@ -369,13 +563,9 @@ export default function DatabaseConsole() {
     startTransition(() => {
       void (async () => {
         try {
-          const result = await MemoryService.runSleepCycle();
-          if (result) {
-            toast.success(`Sleep-cycle pruned ${result.pruned} nodes and distilled ${result.consolidated} facts`);
-          } else {
-            toast.info("Not enough MTM nodes for consolidation yet");
-          }
-          await refreshAll();
+          await MemoryService.runSleepCycle();
+          toast.success("Sleep-cycle queued");
+          await refreshDocumentStatus({ silent: true });
         } catch (error) {
           toast.error(error instanceof Error ? error.message : "Sleep-cycle failed");
         }
@@ -395,11 +585,25 @@ export default function DatabaseConsole() {
     }
   };
 
-  const refreshStm = async () => {
+  const refreshStm = async (page: number = stmPage, query: string = stmQuery) => {
     try {
-      setStm(await MemoryService.listStmEntries({ page: 1, pageSize: 20, query: stmQuery || undefined }));
+      const normalizedPage = Math.max(page, 1);
+      const result = await MemoryService.listStmEntries({ page: normalizedPage, pageSize: STM_PAGE_SIZE, query: query || undefined });
+      setStm(result);
+      setStmPage(normalizedPage);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to filter STM");
+    }
+  };
+
+  const refreshLtm = async (page: number = ltmPage) => {
+    try {
+      const normalizedPage = Math.max(page, 1);
+      const result = await MemoryService.listLtmFacts(normalizedPage, LTM_PAGE_SIZE);
+      setLtm(result);
+      setLtmPage(normalizedPage);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to load LTM facts");
     }
   };
 
@@ -473,12 +677,14 @@ export default function DatabaseConsole() {
                 <RefreshCw className={`mr-2 h-4 w-4 ${isPending ? "animate-spin" : ""}`} />
                 Refresh
               </Button>
-              <Button className="bg-zinc-300 text-neutral-950 hover:bg-zinc-200" onClick={() => void handleSleepCycle()}>
+              <Button className="bg-zinc-300 text-neutral-950 hover:bg-zinc-200" disabled={hasActiveSleepCycle} onClick={() => void handleSleepCycle()}>
                 <ServerCog className="mr-2 h-4 w-4" />
-                Run Sleep-Cycle
+                {hasActiveSleepCycle ? "Sleep-Cycle Running" : "Run Sleep-Cycle"}
               </Button>
             </div>
           </div>
+
+          {latestSleepCycleJob ? <SleepCycleStatusCard job={latestSleepCycleJob} event={latestSleepCycleEvent} /> : null}
 
           <Routes>
             <Route
@@ -514,6 +720,8 @@ export default function DatabaseConsole() {
               element={
                 <StmView
                   stm={stm}
+                  page={stmPage}
+                  pageSize={STM_PAGE_SIZE}
                   query={stmQuery}
                   setQuery={setStmQuery}
                   refreshStm={refreshStm}
@@ -521,7 +729,7 @@ export default function DatabaseConsole() {
               }
             />
             <Route path="/mtm" element={<MtmView graph={graph} />} />
-            <Route path="/ltm" element={<LtmView ltm={ltm} />} />
+            <Route path="/ltm" element={<LtmView ltm={ltm} page={ltmPage} pageSize={LTM_PAGE_SIZE} refreshLtm={refreshLtm} />} />
             <Route path="/jobs" element={<JobsView jobs={jobs} events={events} />} />
           </Routes>
         </main>
@@ -721,34 +929,45 @@ function DocumentsView({
             {documents.map((document) => {
               const summary = document.statusSummary;
               const updatedAt = formatStatusTimestamp(summary.latestEventAt ?? summary.updatedAt);
+              const isSelected = selectedDocument?.documentId === document.documentId;
 
               return (
                 <button
                   key={document.documentId}
                   type="button"
-                  className="w-full rounded-[16px] border border-white/10 bg-neutral-950/40 p-4 text-left transition-all duration-150 hover:border-zinc-300/35 hover:bg-neutral-950/72 active:scale-[0.995]"
+                  className={`w-full rounded-[14px] border p-3 text-left transition-all duration-150 active:scale-[0.995] ${
+                    isSelected
+                      ? "border-zinc-300/40 bg-neutral-900/80 shadow-[0_12px_28px_rgba(255,255,255,0.08)]"
+                      : "border-white/10 bg-neutral-950/40 hover:border-zinc-300/35 hover:bg-neutral-950/72"
+                  }`}
                   onClick={() => void openDocument(document.documentId)}
                 >
                   <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <p className="truncate font-medium text-white">{document.filename}</p>
-                      <p className="mt-1 text-sm text-neutral-400">{getDocumentStageLabel(summary.stage)} · {summary.progress}%</p>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="truncate text-sm font-medium text-white">{document.filename}</p>
+                        {summary.status === "completed" ? (
+                          <span className="rounded-full border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[10px] uppercase tracking-[0.18em] text-neutral-400">
+                            {document.chunkCount} chunks
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] uppercase tracking-[0.18em] text-neutral-500">
+                        <span>{getDocumentStageLabel(summary.stage)}</span>
+                        <span>{summary.progress}%</span>
+                        {updatedAt ? <span>{updatedAt}</span> : null}
+                      </div>
                     </div>
                     <Badge className={getDocumentStatusBadgeClass(summary.status)}>{summary.status}</Badge>
                   </div>
 
-                  <div className="mt-4 h-2 overflow-hidden rounded-full bg-white/10">
-                    <div className={`h-full rounded-full ${getDocumentProgressBarClass(summary.status)}`} style={{ width: `${getDocumentProgressValue(summary)}%` }} />
-                  </div>
-
-                  <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs uppercase tracking-[0.2em] text-neutral-500">
-                    <span>{updatedAt ? `Updated ${updatedAt}` : getDocumentStageLabel(summary.stage)}</span>
-                    {summary.status === "completed" ? <span>{document.chunkCount} chunks</span> : <span>{getDocumentStageLabel(summary.stage)}</span>}
-                  </div>
-
-                  <p className={`mt-2 text-sm ${summary.status === "failed" ? "text-rose-300" : "text-neutral-300"}`}>
+                  <p className={`mt-2 truncate text-sm ${summary.status === "failed" ? "text-rose-300" : "text-neutral-300"}`}>
                     {getDocumentMetaLine(document)}
                   </p>
+
+                  <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/10">
+                    <div className={`h-full rounded-full ${getDocumentProgressBarClass(summary.status)}`} style={{ width: `${getDocumentProgressValue(summary)}%` }} />
+                  </div>
                 </button>
               );
             })}
@@ -826,7 +1045,18 @@ function DocumentsView({
 
 function DocumentImportStatusPanel({ document }: { document: DocumentRecord | DocumentDetail }) {
   const summary = document.statusSummary;
+  const isActive = isDocumentImportActive(summary.status);
+  const [isExpanded, setIsExpanded] = useState(isActive);
+  const previousDocumentIdRef = useRef(document.documentId);
   const updatedAt = formatStatusTimestamp(summary.latestEventAt ?? summary.updatedAt);
+  const summaryLine = getDocumentMetaLine(document);
+
+  useEffect(() => {
+    if (previousDocumentIdRef.current !== document.documentId) {
+      previousDocumentIdRef.current = document.documentId;
+      setIsExpanded(isActive);
+    }
+  }, [document.documentId, isActive]);
 
   return (
     <div className="rounded-[16px] border border-white/10 bg-neutral-900/50 p-5">
@@ -842,63 +1072,234 @@ function DocumentImportStatusPanel({ document }: { document: DocumentRecord | Do
                 : `${summary.progress}% through the current ingestion flow.`}
           </p>
         </div>
-        <Badge className={getDocumentStatusBadgeClass(summary.status)}>{summary.status}</Badge>
+        <div className="flex items-center gap-2">
+          <Badge className={getDocumentStatusBadgeClass(summary.status)}>{summary.status}</Badge>
+          <button
+            type="button"
+            className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5 text-[11px] uppercase tracking-[0.22em] text-neutral-300 transition-colors hover:border-white/16 hover:bg-white/[0.06]"
+            onClick={() => setIsExpanded((current) => !current)}
+            aria-expanded={isExpanded}
+          >
+            {isExpanded ? "Hide Details" : "Show Details"}
+            <ChevronDown className={`h-4 w-4 transition-transform ${isExpanded ? "rotate-180" : "rotate-0"}`} />
+          </button>
+        </div>
       </div>
 
       <div className="mt-4 h-2 overflow-hidden rounded-full bg-white/10">
         <div className={`h-full rounded-full ${getDocumentProgressBarClass(summary.status)}`} style={{ width: `${getDocumentProgressValue(summary)}%` }} />
       </div>
 
-      <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-        {documentImportSteps.map((step) => {
-          const stepState = getDocumentStepState(summary, step.stage);
-
-          return (
-            <div key={step.stage} className={`rounded-[14px] border p-3 ${getDocumentStepCardClass(stepState)}`}>
-              <div className="flex items-center gap-2">
-                {stepState === "complete" ? (
-                  <CheckCircle2 className="h-4 w-4 text-emerald-300" />
-                ) : stepState === "current" ? (
-                  <LoaderCircle className="h-4 w-4 animate-spin text-zinc-300" />
-                ) : stepState === "error" ? (
-                  <AlertTriangle className="h-4 w-4 text-rose-300" />
-                ) : (
-                  <div className="h-2.5 w-2.5 rounded-full bg-white/20" />
-                )}
-                <p className={`text-sm font-medium ${getDocumentStepTextClass(stepState)}`}>{step.label}</p>
-              </div>
-              <p className="mt-2 text-xs uppercase tracking-[0.2em] text-neutral-500">
-                {stepState === "complete" ? "done" : stepState === "current" ? "active" : stepState === "error" ? "error" : "pending"}
-              </p>
-            </div>
-          );
-        })}
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs uppercase tracking-[0.2em] text-neutral-500">
+        <span>{updatedAt ? `Updated ${updatedAt}` : getDocumentStageLabel(summary.stage)}</span>
+        <span>{summaryLine}</span>
       </div>
 
-      <div className="mt-4 rounded-[14px] border border-white/10 bg-white/[0.03] p-4">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <p className="text-xs uppercase tracking-[0.22em] text-neutral-500">Latest activity</p>
-            <p className="mt-2 text-sm text-neutral-200">{summary.latestEventMessage ?? getDocumentMetaLine(document)}</p>
+      {isExpanded ? (
+        <div className="mt-4 space-y-4">
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+            {documentImportSteps.map((step) => {
+              const stepState = getDocumentStepState(summary, step.stage);
+
+              return (
+                <div key={step.stage} className={`rounded-[14px] border p-3 ${getDocumentStepCardClass(stepState)}`}>
+                  <div className="flex items-center gap-2">
+                    {stepState === "complete" ? (
+                      <CheckCircle2 className="h-4 w-4 text-emerald-300" />
+                    ) : stepState === "current" ? (
+                      <LoaderCircle className="h-4 w-4 animate-spin text-zinc-300" />
+                    ) : stepState === "error" ? (
+                      <AlertTriangle className="h-4 w-4 text-rose-300" />
+                    ) : (
+                      <div className="h-2.5 w-2.5 rounded-full bg-white/20" />
+                    )}
+                    <p className={`text-sm font-medium ${getDocumentStepTextClass(stepState)}`}>{step.label}</p>
+                  </div>
+                  <p className="mt-2 text-xs uppercase tracking-[0.2em] text-neutral-500">
+                    {stepState === "complete" ? "done" : stepState === "current" ? "active" : stepState === "error" ? "error" : "pending"}
+                  </p>
+                </div>
+              );
+            })}
           </div>
-          {updatedAt ? <p className="text-xs uppercase tracking-[0.22em] text-neutral-500">{updatedAt}</p> : null}
+
+          <div className="rounded-[14px] border border-white/10 bg-white/[0.03] p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="text-xs uppercase tracking-[0.22em] text-neutral-500">Latest activity</p>
+                <p className="mt-2 text-sm text-neutral-200">{summaryLine}</p>
+              </div>
+              {updatedAt ? <p className="text-xs uppercase tracking-[0.22em] text-neutral-500">{updatedAt}</p> : null}
+            </div>
+            {summary.latestEventMessage && summary.latestEventMessage !== summaryLine ? <p className="mt-3 text-sm text-neutral-300">{summary.latestEventMessage}</p> : null}
+            {summary.errorMessage ? <p className="mt-3 text-sm text-rose-300">{summary.errorMessage}</p> : null}
+          </div>
         </div>
-        {summary.errorMessage ? <p className="mt-3 text-sm text-rose-300">{summary.errorMessage}</p> : null}
+      ) : null}
+    </div>
+  );
+}
+
+function SleepCycleStatusCard({ job, event }: { job: JobRecord; event: PipelineEvent | null }) {
+  const isActive = isDocumentImportActive(job.status);
+  const [isExpanded, setIsExpanded] = useState(isActive);
+  const previousJobIdRef = useRef(job.jobId);
+  const updatedAt = formatStatusTimestamp(event?.createdAt ?? job.updatedAt);
+  const summaryLine = getSleepCycleSummaryLine(job, event);
+  const progressValue = getSleepCycleProgressValue(job, event);
+
+  useEffect(() => {
+    if (previousJobIdRef.current !== job.jobId) {
+      previousJobIdRef.current = job.jobId;
+      setIsExpanded(isActive);
+    }
+  }, [job.jobId, isActive]);
+
+  return (
+    <div className="rounded-[18px] border border-white/10 bg-white/[0.04] p-5 shadow-none">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-xs uppercase tracking-[0.22em] text-neutral-500">Sleep-Cycle Status</p>
+          <h3 className="mt-2 text-lg font-semibold text-white">{getSleepCycleStageLabel(job.stage)}</h3>
+          <p className="mt-1 text-sm text-neutral-400">
+            {job.status === "completed"
+              ? summaryLine
+              : job.status === "failed"
+                ? "The sleep cycle stopped before LTM distillation and graph cleanup completed."
+                : `${job.progress}% through MTM consolidation, LTM distillation, and graph cleanup.`}
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <Badge className={getDocumentStatusBadgeClass(job.status)}>{job.status}</Badge>
+          <button
+            type="button"
+            className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-3 py-1.5 text-[11px] uppercase tracking-[0.22em] text-neutral-300 transition-colors hover:border-white/16 hover:bg-white/[0.06]"
+            onClick={() => setIsExpanded((current) => !current)}
+            aria-expanded={isExpanded}
+          >
+            {isExpanded ? "Hide Details" : "Show Details"}
+            <ChevronDown className={`h-4 w-4 transition-transform ${isExpanded ? "rotate-180" : "rotate-0"}`} />
+          </button>
+        </div>
       </div>
+
+      <div className="mt-4 h-2 overflow-hidden rounded-full bg-white/10">
+        <div className={`h-full rounded-full ${getDocumentProgressBarClass(job.status)}`} style={{ width: `${progressValue}%` }} />
+      </div>
+
+      <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs uppercase tracking-[0.2em] text-neutral-500">
+        <span>{updatedAt ? `Updated ${updatedAt}` : getSleepCycleStageLabel(job.stage)}</span>
+        <span>{summaryLine}</span>
+      </div>
+
+      {isExpanded ? (
+        <div className="mt-4 space-y-4">
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+            {sleepCycleSteps.map((step) => {
+              const stepState = getSleepCycleStepState(job, step.key);
+
+              return (
+                <div key={step.key} className={`rounded-[14px] border p-3 ${getDocumentStepCardClass(stepState)}`}>
+                  <div className="flex items-center gap-2">
+                    {stepState === "complete" ? (
+                      <CheckCircle2 className="h-4 w-4 text-emerald-300" />
+                    ) : stepState === "current" ? (
+                      <LoaderCircle className="h-4 w-4 animate-spin text-zinc-300" />
+                    ) : stepState === "error" ? (
+                      <AlertTriangle className="h-4 w-4 text-rose-300" />
+                    ) : (
+                      <div className="h-2.5 w-2.5 rounded-full bg-white/20" />
+                    )}
+                    <p className={`text-sm font-medium ${getDocumentStepTextClass(stepState)}`}>{step.label}</p>
+                  </div>
+                  <p className="mt-2 text-xs uppercase tracking-[0.2em] text-neutral-500">
+                    {stepState === "complete" ? "done" : stepState === "current" ? "active" : stepState === "error" ? "error" : "pending"}
+                  </p>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="rounded-[14px] border border-white/10 bg-white/[0.03] p-4">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <p className="text-xs uppercase tracking-[0.22em] text-neutral-500">Latest activity</p>
+                <p className="mt-2 text-sm text-neutral-200">{summaryLine}</p>
+              </div>
+              {updatedAt ? <p className="text-xs uppercase tracking-[0.22em] text-neutral-500">{updatedAt}</p> : null}
+            </div>
+            {event?.message && event.message !== summaryLine ? <p className="mt-3 text-sm text-neutral-300">{event.message}</p> : null}
+            {job.errorMessage ? <p className="mt-3 text-sm text-rose-300">{job.errorMessage}</p> : null}
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function PaginationControls({
+  page,
+  pageSize,
+  total,
+  itemLabel,
+  onPageChange,
+}: {
+  page: number;
+  pageSize: number;
+  total: number;
+  itemLabel: string;
+  onPageChange: (page: number) => Promise<void>;
+}) {
+  const totalPages = getTotalPages(total, pageSize);
+  const rangeStart = total === 0 ? 0 : (page - 1) * pageSize + 1;
+  const rangeEnd = total === 0 ? 0 : Math.min(total, page * pageSize);
+
+  return (
+    <div className="mt-4 flex flex-col gap-3 border-t border-white/10 pt-4 text-sm text-neutral-400 sm:flex-row sm:items-center sm:justify-between">
+      <p>{total === 0 ? `No ${itemLabel} available` : `${rangeStart}-${rangeEnd} of ${total} ${itemLabel}`}</p>
+      {totalPages > 1 ? (
+        <div className="flex items-center gap-2">
+          <Button
+            variant="outline"
+            size="xs"
+            className="border-white/10 bg-white/[0.04] text-neutral-100 hover:bg-white/[0.08]"
+            disabled={page <= 1}
+            onClick={() => void onPageChange(page - 1)}
+          >
+            Previous
+          </Button>
+          <span className="min-w-[92px] text-center text-[11px] uppercase tracking-[0.22em] text-neutral-500">
+            Page {page} / {totalPages}
+          </span>
+          <Button
+            variant="outline"
+            size="xs"
+            className="border-white/10 bg-white/[0.04] text-neutral-100 hover:bg-white/[0.08]"
+            disabled={page >= totalPages}
+            onClick={() => void onPageChange(page + 1)}
+          >
+            Next
+          </Button>
+        </div>
+      ) : null}
     </div>
   );
 }
 
 function StmView({
   stm,
+  page,
+  pageSize,
   query,
   setQuery,
   refreshStm,
 }: {
   stm: { entries: EpisodicMemory[]; total: number };
+  page: number;
+  pageSize: number;
   query: string;
   setQuery: (value: string) => void;
-  refreshStm: () => Promise<void>;
+  refreshStm: (page?: number, query?: string) => Promise<void>;
 }) {
   return (
     <Card className="border-white/10 bg-white/[0.04] text-neutral-100 shadow-none">
@@ -908,17 +1309,23 @@ function StmView({
             <CardTitle>Short-Term Memory Knowledge Base</CardTitle>
             <CardDescription className="text-neutral-400">Deterministic PostgreSQL view of imported chunks and live episodic rows</CardDescription>
           </div>
-          <div className="flex gap-3">
+          <form
+            className="flex gap-3"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void refreshStm(1, query);
+            }}
+          >
             <Input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               placeholder="Filter by content"
               className="border-white/10 bg-neutral-900/50 text-neutral-100"
             />
-            <Button variant="outline" className="border-white/10 bg-white/[0.04] text-neutral-100 hover:bg-white/[0.08]" onClick={() => void refreshStm()}>
+            <Button type="submit" variant="outline" className="border-white/10 bg-white/[0.04] text-neutral-100 hover:bg-white/[0.08]">
               Apply
             </Button>
-          </div>
+          </form>
         </div>
       </CardHeader>
       <CardContent>
@@ -934,19 +1341,33 @@ function StmView({
               </tr>
             </thead>
             <tbody className="divide-y divide-white/10 bg-white/[0.03]">
-              {stm.entries.map((entry) => (
-                <tr key={entry.interactionId} className="transition-colors hover:bg-white/[0.04]">
-                  <td className="px-4 py-3"><Badge className="bg-white/10 text-neutral-100">{entry.actor}</Badge></td>
-                  <td className="px-4 py-3 text-neutral-300">{entry.sessionId}</td>
-                  <td className="px-4 py-3 text-neutral-400">{entry.sourceType ?? "conversation"}</td>
-                  <td className="px-4 py-3 text-neutral-200">{entry.rawText.slice(0, 160)}</td>
-                  <td className="px-4 py-3 text-neutral-400">{new Date(entry.timestamp).toLocaleString()}</td>
+              {stm.entries.length > 0 ? (
+                stm.entries.map((entry) => (
+                  <tr key={entry.interactionId} className="transition-colors hover:bg-white/[0.04]">
+                    <td className="px-4 py-3"><Badge className="bg-white/10 text-neutral-100">{entry.actor}</Badge></td>
+                    <td className="px-4 py-3 text-neutral-300">{entry.sessionId}</td>
+                    <td className="px-4 py-3 text-neutral-400">{entry.sourceType ?? "conversation"}</td>
+                    <td className="px-4 py-3 text-neutral-200">{entry.rawText.slice(0, 160)}</td>
+                    <td className="px-4 py-3 text-neutral-400">{new Date(entry.timestamp).toLocaleString()}</td>
+                  </tr>
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={5} className="px-4 py-8 text-center text-neutral-400">
+                    No STM entries match the current filter.
+                  </td>
                 </tr>
-              ))}
+              )}
             </tbody>
           </table>
         </div>
-        <p className="mt-4 text-sm text-neutral-400">{stm.total} STM rows available</p>
+        <PaginationControls
+          page={page}
+          pageSize={pageSize}
+          total={stm.total}
+          itemLabel="STM rows"
+          onPageChange={(nextPage) => refreshStm(nextPage, query)}
+        />
       </CardContent>
     </Card>
   );
@@ -984,7 +1405,17 @@ function MtmView({ graph }: { graph: GraphSnapshot }) {
   );
 }
 
-function LtmView({ ltm }: { ltm: { facts: SemanticFact[]; total: number } }) {
+function LtmView({
+  ltm,
+  page,
+  pageSize,
+  refreshLtm,
+}: {
+  ltm: { facts: SemanticFact[]; total: number };
+  page: number;
+  pageSize: number;
+  refreshLtm: (page?: number) => Promise<void>;
+}) {
   return (
     <Card className="border-white/10 bg-white/[0.04] text-neutral-100 shadow-none">
       <CardHeader>
@@ -992,25 +1423,37 @@ function LtmView({ ltm }: { ltm: { facts: SemanticFact[]; total: number } }) {
         <CardDescription className="text-neutral-400">pgvector-backed semantic facts distilled from MTM communities with vector fingerprints for validation</CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">
-        {ltm.facts.map((fact) => (
-          <div key={fact.knowledgeId} className="rounded-[16px] border border-white/10 bg-neutral-900/50 p-4 transition-colors hover:border-white/16 hover:bg-neutral-950/72">
-            <div className="flex items-start justify-between gap-3">
-              <p className="text-base font-medium text-white">{fact.distilledFact}</p>
-              <Badge className="bg-white/10 text-neutral-100">{fact.provenance?.length ?? 0} sources</Badge>
-            </div>
-            <div className="mt-3 rounded-[14px] border border-white/10 bg-neutral-950/55 p-3">
-              <div className="flex flex-wrap items-center gap-2">
-                <Badge className={fact.embeddingSummary.dimensions > 0 ? "bg-emerald-300/90 text-emerald-950" : "bg-rose-300/90 text-rose-950"}>
-                  {fact.embeddingSummary.dimensions > 0 ? `${fact.embeddingSummary.dimensions}-dim vector` : "Vector unavailable"}
-                </Badge>
-                <span className="text-[11px] uppercase tracking-[0.22em] text-neutral-500">SHA-256 fingerprint</span>
+        {ltm.facts.length > 0 ? (
+          ltm.facts.map((fact) => (
+            <div key={fact.knowledgeId} className="rounded-[16px] border border-white/10 bg-neutral-900/50 p-4 transition-colors hover:border-white/16 hover:bg-neutral-950/72">
+              <div className="flex items-start justify-between gap-3">
+                <p className="text-base font-medium text-white">{fact.distilledFact}</p>
+                <Badge className="bg-white/10 text-neutral-100">{fact.provenance?.length ?? 0} sources</Badge>
               </div>
-              <p className="mt-2 break-all font-mono text-xs text-neutral-300">{fact.embeddingSummary.checksum}</p>
+              <div className="mt-3 rounded-[14px] border border-white/10 bg-neutral-950/55 p-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge className={fact.embeddingSummary.dimensions > 0 ? "bg-emerald-300/90 text-emerald-950" : "bg-rose-300/90 text-rose-950"}>
+                    {fact.embeddingSummary.dimensions > 0 ? `${fact.embeddingSummary.dimensions}-dim vector` : "Vector unavailable"}
+                  </Badge>
+                  <span className="text-[11px] uppercase tracking-[0.22em] text-neutral-500">SHA-256 fingerprint</span>
+                </div>
+                <p className="mt-2 break-all font-mono text-xs text-neutral-300">{fact.embeddingSummary.checksum}</p>
+              </div>
+              <p className="mt-2 text-sm text-neutral-400">Last accessed {new Date(fact.lastAccessed).toLocaleString()}</p>
             </div>
-            <p className="mt-2 text-sm text-neutral-400">Last accessed {new Date(fact.lastAccessed).toLocaleString()}</p>
+          ))
+        ) : (
+          <div className="rounded-[16px] border border-dashed border-white/10 bg-neutral-950/30 px-4 py-10 text-center text-sm text-neutral-400">
+            No distilled LTM facts are available yet.
           </div>
-        ))}
-        <p className="pt-2 text-sm text-neutral-400">{ltm.total} LTM facts available</p>
+        )}
+        <PaginationControls
+          page={page}
+          pageSize={pageSize}
+          total={ltm.total}
+          itemLabel="LTM facts"
+          onPageChange={(nextPage) => refreshLtm(nextPage)}
+        />
       </CardContent>
     </Card>
   );

@@ -55,32 +55,45 @@ export async function addDocumentChunksToSTM(
     sectionLabel?: string | null;
     pageRange?: string | null;
     tokenEstimate?: number;
-  }>
+  }>,
+  options?: {
+    batchSize?: number;
+    onBatchProcessed?: (processedChunks: number, totalChunks: number) => Promise<void> | void;
+  }
 ): Promise<string[]> {
   if (chunks.length === 0) {
     return [];
   }
 
-  const rows = await db
-    .insert(shortTermMemory)
-    .values(
-      chunks.map((chunk) => ({
-        sessionId: `document:${documentId}`,
-        actor: "document" as const,
-        rawText: chunk.contentText.slice(0, 5120),
-        sourceType: "docling_import",
-        documentId,
-        chunkId: chunk.chunkId,
-        metadata: {
-          sectionLabel: chunk.sectionLabel ?? null,
-          pageRange: chunk.pageRange ?? null,
-          tokenEstimate: chunk.tokenEstimate ?? 0,
-        },
-      }))
-    )
-    .returning({ id: shortTermMemory.interactionId });
+  const batchSize = Math.min(Math.max(options?.batchSize ?? 10, 1), 100);
+  const interactionIds: string[] = [];
 
-  return rows.map((row) => row.id);
+  for (let index = 0; index < chunks.length; index += batchSize) {
+    const batch = chunks.slice(index, index + batchSize);
+    const rows = await db
+      .insert(shortTermMemory)
+      .values(
+        batch.map((chunk) => ({
+          sessionId: `document:${documentId}`,
+          actor: "document" as const,
+          rawText: chunk.contentText.slice(0, 5120),
+          sourceType: "docling_import",
+          documentId,
+          chunkId: chunk.chunkId,
+          metadata: {
+            sectionLabel: chunk.sectionLabel ?? null,
+            pageRange: chunk.pageRange ?? null,
+            tokenEstimate: chunk.tokenEstimate ?? 0,
+          },
+        }))
+      )
+      .returning({ id: shortTermMemory.interactionId });
+
+    interactionIds.push(...rows.map((row) => row.id));
+    await options?.onBatchProcessed?.(Math.min(index + batch.length, chunks.length), chunks.length);
+  }
+
+  return interactionIds;
 }
 
 export async function getRecentContext(

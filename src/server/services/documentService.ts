@@ -6,7 +6,7 @@ import { db } from "../db/index.js";
 import { documentChunks, documents, ingestionJobs } from "../db/schema.js";
 import { chunkParsedDocument, parseDocumentWithDocling } from "./doclingService.js";
 import { createJob, listPipelineEvents, markJobCompleted, markJobFailed, markJobRunning, recordPipelineEvent } from "./jobService.js";
-import { consolidateToMTM, refreshMtmGraphAnalytics } from "./mtmService.js";
+import { consolidateToMTM, refreshMtmGraphAnalytics, type RefreshMtmGraphAnalyticsStep } from "./mtmService.js";
 import { addDocumentChunksToSTM } from "./stmService.js";
 
 export interface DocumentRecord {
@@ -76,6 +76,21 @@ interface LatestEventRow {
   message: string;
   created_at: Date | string;
 }
+
+const DOCUMENT_IMPORT_PROGRESS = {
+  parsingStart: 8,
+  parsingComplete: 20,
+  chunkPreparation: 28,
+  stmStart: 32,
+  stmComplete: 55,
+  mtmStart: 56,
+  mtmComplete: 92,
+  graphStart: 93,
+  graphProjected: 95,
+  graphRanked: 97,
+  graphClustered: 99,
+  completed: 100,
+} as const;
 
 export async function importUploadedDocuments(files: Express.Multer.File[]) {
   const imported: Array<typeof documents.$inferSelect> = [];
@@ -150,19 +165,33 @@ async function processQueuedDocumentImport({ file, documentId, jobId }: QueuedDo
 
   try {
     currentStage = "parsing";
-    await markJobRunning(jobId, currentStage, 15);
+    await markJobRunning(jobId, currentStage, DOCUMENT_IMPORT_PROGRESS.parsingStart);
     await db
       .update(documents)
       .set({ importStatus: "running", updatedAt: new Date() })
       .where(eq(documents.documentId, documentId));
 
+    await recordPipelineEvent({
+      jobId,
+      documentId,
+      stage: currentStage,
+      message: `Sending ${file.originalname} to the parser`,
+      payload: {
+        progress: DOCUMENT_IMPORT_PROGRESS.parsingStart,
+      },
+    });
+
     const parsed = await parseDocumentWithDocling(file);
+    await markJobRunning(jobId, currentStage, DOCUMENT_IMPORT_PROGRESS.parsingComplete);
     await recordPipelineEvent({
       jobId,
       documentId,
       stage: currentStage,
       message: `Parsed ${file.originalname} with ${parsed.parserName}`,
-      payload: { sections: parsed.sections.length },
+      payload: {
+        progress: DOCUMENT_IMPORT_PROGRESS.parsingComplete,
+        sections: parsed.sections.length,
+      },
     });
 
     const chunks = chunkParsedDocument(parsed);
@@ -189,7 +218,20 @@ async function processQueuedDocumentImport({ file, documentId, jobId }: QueuedDo
       });
 
     currentStage = "writing_stm";
-    await markJobRunning(jobId, currentStage, 40);
+    await markJobRunning(jobId, currentStage, DOCUMENT_IMPORT_PROGRESS.chunkPreparation);
+    await recordPipelineEvent({
+      jobId,
+      documentId,
+      stage: currentStage,
+      message: `Prepared ${insertedChunks.length} chunks from ${parsed.sections.length} sections`,
+      payload: {
+        progress: DOCUMENT_IMPORT_PROGRESS.chunkPreparation,
+        sectionCount: parsed.sections.length,
+        chunkCount: insertedChunks.length,
+      },
+    });
+
+    let lastStmEventPercent = -1;
     const interactionIds = await addDocumentChunksToSTM(
       documentId,
       insertedChunks.map((chunk) => ({
@@ -198,7 +240,35 @@ async function processQueuedDocumentImport({ file, documentId, jobId }: QueuedDo
         sectionLabel: chunk.sectionLabel,
         pageRange: chunk.pageRange,
         tokenEstimate: chunk.tokenEstimate,
-      }))
+      })),
+      {
+        batchSize: Math.max(1, Math.ceil(Math.max(insertedChunks.length, 1) / 8)),
+        onBatchProcessed: async (processedChunks, totalChunks) => {
+          const progress = interpolateProgress(
+            DOCUMENT_IMPORT_PROGRESS.stmStart,
+            DOCUMENT_IMPORT_PROGRESS.stmComplete,
+            processedChunks,
+            totalChunks
+          );
+          await markJobRunning(jobId, currentStage, progress);
+
+          const currentPercent = Math.floor((processedChunks / Math.max(totalChunks, 1)) * 100);
+          if (processedChunks === totalChunks || processedChunks === 1 || currentPercent >= lastStmEventPercent + 20) {
+            lastStmEventPercent = currentPercent;
+            await recordPipelineEvent({
+              jobId,
+              documentId,
+              stage: currentStage,
+              message: `Stored ${processedChunks} of ${totalChunks} chunks in STM`,
+              payload: {
+                progress,
+                processedChunks,
+                totalChunks,
+              },
+            });
+          }
+        },
+      }
     );
 
     await recordPipelineEvent({
@@ -206,13 +276,47 @@ async function processQueuedDocumentImport({ file, documentId, jobId }: QueuedDo
       documentId,
       stage: currentStage,
       message: "Inserted document chunks into STM",
-      payload: { chunkCount: insertedChunks.length },
+      payload: {
+        progress: DOCUMENT_IMPORT_PROGRESS.stmComplete,
+        chunkCount: insertedChunks.length,
+      },
     });
 
     currentStage = "promoting_mtm";
-    await markJobRunning(jobId, currentStage, 65);
+    await markJobRunning(jobId, currentStage, DOCUMENT_IMPORT_PROGRESS.mtmStart);
+    let lastPromotionProgress: number = DOCUMENT_IMPORT_PROGRESS.mtmStart;
+    let lastPromotionEventPercent = -1;
     for (let index = 0; index < interactionIds.length; index += 1) {
       await consolidateToMTM(interactionIds[index], insertedChunks[index].contentText);
+
+      const completedChunks = index + 1;
+      const progress = interpolateProgress(
+        DOCUMENT_IMPORT_PROGRESS.mtmStart,
+        DOCUMENT_IMPORT_PROGRESS.mtmComplete,
+        completedChunks,
+        interactionIds.length
+      );
+
+      if (progress > lastPromotionProgress) {
+        await markJobRunning(jobId, currentStage, progress);
+        lastPromotionProgress = progress;
+      }
+
+      const currentPercent = Math.floor((completedChunks / Math.max(interactionIds.length, 1)) * 100);
+      if (completedChunks === interactionIds.length || completedChunks === 1 || currentPercent >= lastPromotionEventPercent + 10) {
+        lastPromotionEventPercent = currentPercent;
+        await recordPipelineEvent({
+          jobId,
+          documentId,
+          stage: currentStage,
+          message: `Promoted ${completedChunks} of ${interactionIds.length} chunks into MTM`,
+          payload: {
+            progress,
+            promotedChunks: completedChunks,
+            totalChunks: interactionIds.length,
+          },
+        });
+      }
     }
 
     await recordPipelineEvent({
@@ -220,19 +324,49 @@ async function processQueuedDocumentImport({ file, documentId, jobId }: QueuedDo
       documentId,
       stage: currentStage,
       message: "Promoted STM chunks into MTM graph",
-      payload: { promotedChunks: interactionIds.length },
+      payload: {
+        progress: DOCUMENT_IMPORT_PROGRESS.mtmComplete,
+        promotedChunks: interactionIds.length,
+      },
     });
 
     currentStage = "refreshing_graph";
-    await markJobRunning(jobId, currentStage, 82);
+    await markJobRunning(jobId, currentStage, DOCUMENT_IMPORT_PROGRESS.graphStart);
+    await recordPipelineEvent({
+      jobId,
+      documentId,
+      stage: currentStage,
+      message: "Refreshing MTM graph analytics",
+      payload: {
+        progress: DOCUMENT_IMPORT_PROGRESS.graphStart,
+      },
+    });
     try {
-      await refreshMtmGraphAnalytics();
+      await refreshMtmGraphAnalytics({
+        onStep: async (step) => {
+          const progress = mapGraphRefreshProgress(step);
+          await markJobRunning(jobId, currentStage, progress);
+          await recordPipelineEvent({
+            jobId,
+            documentId,
+            stage: currentStage,
+            message: getGraphRefreshMessage(step),
+            payload: {
+              progress,
+              step,
+            },
+          });
+        },
+      });
       await recordPipelineEvent({
         jobId,
         documentId,
         stage: currentStage,
         message: "Recomputed MTM PageRank and communities across the full graph",
-        payload: { promotedChunks: interactionIds.length },
+        payload: {
+          progress: DOCUMENT_IMPORT_PROGRESS.graphClustered,
+          promotedChunks: interactionIds.length,
+        },
       });
     } catch (error) {
       await recordPipelineEvent({
@@ -272,6 +406,10 @@ async function processQueuedDocumentImport({ file, documentId, jobId }: QueuedDo
       documentId,
       stage: "completed",
       message: "Document import completed",
+      payload: {
+        progress: DOCUMENT_IMPORT_PROGRESS.completed,
+        chunkCount: insertedChunks.length,
+      },
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -292,6 +430,37 @@ async function processQueuedDocumentImport({ file, documentId, jobId }: QueuedDo
       message: "Document import failed",
       payload: { error: message },
     });
+  }
+}
+
+function interpolateProgress(start: number, end: number, completedUnits: number, totalUnits: number) {
+  if (totalUnits <= 0) {
+    return end;
+  }
+
+  const ratio = Math.min(1, Math.max(0, completedUnits / totalUnits));
+  return Math.round(start + (end - start) * ratio);
+}
+
+function mapGraphRefreshProgress(step: RefreshMtmGraphAnalyticsStep) {
+  switch (step) {
+    case "projected":
+      return DOCUMENT_IMPORT_PROGRESS.graphProjected;
+    case "ranked":
+      return DOCUMENT_IMPORT_PROGRESS.graphRanked;
+    case "clustered":
+      return DOCUMENT_IMPORT_PROGRESS.graphClustered;
+  }
+}
+
+function getGraphRefreshMessage(step: RefreshMtmGraphAnalyticsStep) {
+  switch (step) {
+    case "projected":
+      return "Projected the MTM graph for analytics";
+    case "ranked":
+      return "Updated MTM PageRank scores";
+    case "clustered":
+      return "Updated MTM community assignments";
   }
 }
 

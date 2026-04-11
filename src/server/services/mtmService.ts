@@ -62,6 +62,8 @@ const MTM_GRAPH_RELATIONSHIP_PROJECTION = {
   SIMILAR_TO: { orientation: "UNDIRECTED", properties: ["combinedWeight"] },
 };
 
+export type RefreshMtmGraphAnalyticsStep = "projected" | "ranked" | "clustered";
+
 export async function consolidateToMTM(
   interactionId: string,
   content: string
@@ -184,7 +186,9 @@ export async function getMtmCount(): Promise<number> {
   }
 }
 
-export async function refreshMtmGraphAnalytics(): Promise<void> {
+export async function refreshMtmGraphAnalytics(options?: {
+  onStep?: (step: RefreshMtmGraphAnalyticsStep) => Promise<void> | void;
+}): Promise<void> {
   const driver = getNeo4jDriver();
   const session = driver.session();
   const graphName = `nhrag_mtm_refresh_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -206,6 +210,7 @@ export async function refreshMtmGraphAnalytics(): Promise<void> {
       }
     );
     graphProjected = true;
+    await options?.onStep?.("projected");
 
     await session.run(
       `CALL gds.pageRank.write($graphName, {
@@ -215,6 +220,7 @@ export async function refreshMtmGraphAnalytics(): Promise<void> {
       })`,
       { graphName }
     );
+    await options?.onStep?.("ranked");
 
     await session.run(
       `CALL gds.louvain.write($graphName, {
@@ -223,6 +229,7 @@ export async function refreshMtmGraphAnalytics(): Promise<void> {
       })`,
       { graphName }
     );
+    await options?.onStep?.("clustered");
   } finally {
     if (graphProjected) {
       try {

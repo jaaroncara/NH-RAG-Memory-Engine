@@ -1,4 +1,4 @@
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, sql } from "drizzle-orm";
 
 import { db } from "../db/index.js";
 import { ingestionJobs, pipelineEvents } from "../db/schema.js";
@@ -55,7 +55,7 @@ export async function markJobRunning(jobId: string, stage: string, progress: num
       status: "running",
       stage,
       progress,
-      startedAt: new Date(),
+      startedAt: sql`coalesce(${ingestionJobs.startedAt}, now())`,
       updatedAt: new Date(),
     })
     .where(eq(ingestionJobs.jobId, jobId));

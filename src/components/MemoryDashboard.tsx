@@ -101,12 +101,8 @@ export default function MemoryDashboard() {
   const runSleepCycle = async () => {
     toast.info("Starting Sleep-Cycle Consolidation...");
     try {
-      const result = await MemoryService.runSleepCycle();
-      if (result) {
-        toast.success(`Sleep-Cycle complete: Pruned ${result.pruned} nodes, Consolidated ${result.consolidated} facts.`);
-      } else {
-        toast.info("Not enough data for consolidation yet.");
-      }
+      await MemoryService.runSleepCycle();
+      toast.success("Sleep-Cycle queued.");
     } catch (error) {
       toast.error("Sleep-Cycle failed");
     }
