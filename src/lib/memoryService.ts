@@ -50,6 +50,20 @@ export interface DocumentRecord {
   metadata: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
+  statusSummary: DocumentImportStatusSummary;
+}
+
+export interface DocumentImportStatusSummary {
+  jobId: string | null;
+  status: string;
+  stage: string;
+  progress: number;
+  errorMessage: string | null;
+  latestEventMessage: string | null;
+  latestEventStage: string | null;
+  latestEventLevel: string | null;
+  latestEventAt: string | null;
+  updatedAt: string;
 }
 
 export interface DocumentDetail extends DocumentRecord {

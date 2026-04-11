@@ -1,12 +1,15 @@
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import {
   Activity,
+  AlertTriangle,
   ArrowUpRight,
   Database,
   FileStack,
   GitBranch,
   HardDriveUpload,
+  CheckCircle2,
+  LoaderCircle,
   Orbit,
   RefreshCw,
   ServerCog,
@@ -20,7 +23,7 @@ import { Button } from "../../components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../../components/ui/card";
 import { Input } from "../../components/ui/input";
 import { ScrollArea } from "../../components/ui/scroll-area";
-import { MemoryService, type DocumentDetail, type DocumentRecord, type EpisodicMemory, type GraphSnapshot, type JobRecord, type OverviewMetrics, type PipelineEvent, type SemanticFact } from "../lib/memoryService";
+import { MemoryService, type DocumentDetail, type DocumentImportStatusSummary, type DocumentRecord, type EpisodicMemory, type GraphSnapshot, type JobRecord, type OverviewMetrics, type PipelineEvent, type SemanticFact } from "../lib/memoryService";
 import MtmGraph from "./MtmGraph";
 import QueryConsoleView from "./QueryConsoleView";
 
@@ -33,6 +36,174 @@ const navItems = [
   { to: "/console", label: "Data Console", icon: ServerCog },
   { to: "/jobs", label: "Logs", icon: GitBranch },
 ];
+
+const documentImportSteps = [
+  { stage: "uploaded", label: "Upload" },
+  { stage: "parsing", label: "Parse" },
+  { stage: "writing_stm", label: "Chunk to STM" },
+  { stage: "promoting_mtm", label: "Promote to MTM" },
+  { stage: "refreshing_graph", label: "Refresh Graph" },
+] as const;
+
+const documentStageLabels: Record<string, string> = {
+  uploaded: "Upload received",
+  parsing: "Parsing with Docling",
+  writing_stm: "Chunking into STM",
+  promoting_mtm: "Promoting into MTM",
+  refreshing_graph: "Refreshing MTM graph",
+  completed: "Import completed",
+  failed: "Import failed",
+};
+
+type DocumentStepState = "complete" | "current" | "pending" | "error";
+
+function isDocumentImportActive(status: string) {
+  return status === "queued" || status === "running";
+}
+
+function getDocumentStageLabel(stage: string) {
+  return documentStageLabels[stage] ?? stage.replace(/_/g, " ");
+}
+
+function getDocumentStatusBadgeClass(status: string) {
+  switch (status) {
+    case "completed":
+      return "bg-emerald-300/90 text-emerald-950";
+    case "failed":
+      return "bg-rose-300/90 text-rose-950";
+    case "running":
+      return "bg-zinc-300 text-neutral-950";
+    default:
+      return "bg-white/10 text-neutral-100";
+  }
+}
+
+function getDocumentProgressBarClass(status: string) {
+  switch (status) {
+    case "completed":
+      return "bg-emerald-300";
+    case "failed":
+      return "bg-rose-300";
+    default:
+      return "bg-zinc-300";
+  }
+}
+
+function getDocumentProgressValue(summary: DocumentImportStatusSummary) {
+  if (summary.status === "completed") {
+    return 100;
+  }
+
+  if (summary.status === "queued") {
+    return Math.max(summary.progress, 6);
+  }
+
+  return Math.max(summary.progress, 0);
+}
+
+function getDocumentImportStageKey(summary: DocumentImportStatusSummary) {
+  if (documentImportSteps.some((step) => step.stage === summary.stage)) {
+    return summary.stage;
+  }
+
+  if (summary.latestEventStage && documentImportSteps.some((step) => step.stage === summary.latestEventStage)) {
+    return summary.latestEventStage;
+  }
+
+  return summary.stage;
+}
+
+function getDocumentStepState(summary: DocumentImportStatusSummary, stepStage: string): DocumentStepState {
+  if (summary.status === "completed") {
+    return "complete";
+  }
+
+  const activeStage = getDocumentImportStageKey(summary);
+  const activeIndex = documentImportSteps.findIndex((step) => step.stage === activeStage);
+  const stepIndex = documentImportSteps.findIndex((step) => step.stage === stepStage);
+
+  if (summary.status === "failed") {
+    if (activeStage === stepStage) {
+      return "error";
+    }
+
+    if (activeIndex >= 0 && stepIndex < activeIndex) {
+      return "complete";
+    }
+
+    return "pending";
+  }
+
+  if (summary.status === "queued") {
+    return stepStage === "uploaded" ? "current" : "pending";
+  }
+
+  if (activeStage === stepStage) {
+    return "current";
+  }
+
+  if (activeIndex >= 0 && stepIndex < activeIndex) {
+    return "complete";
+  }
+
+  return "pending";
+}
+
+function getDocumentStepCardClass(state: DocumentStepState) {
+  switch (state) {
+    case "complete":
+      return "border-emerald-300/25 bg-emerald-300/10";
+    case "current":
+      return "border-zinc-300/35 bg-zinc-300/10";
+    case "error":
+      return "border-rose-300/25 bg-rose-300/10";
+    default:
+      return "border-white/10 bg-white/[0.03]";
+  }
+}
+
+function getDocumentStepTextClass(state: DocumentStepState) {
+  switch (state) {
+    case "complete":
+      return "text-emerald-100";
+    case "current":
+      return "text-white";
+    case "error":
+      return "text-rose-100";
+    default:
+      return "text-neutral-300";
+  }
+}
+
+function getDocumentStatusCounts(documents: DocumentRecord[]) {
+  return documents.reduce<Record<string, number>>((accumulator, document) => {
+    const status = document.statusSummary.status;
+    accumulator[status] = (accumulator[status] ?? 0) + 1;
+    return accumulator;
+  }, {});
+}
+
+function getDocumentMetaLine(document: DocumentRecord | DocumentDetail) {
+  const summary = document.statusSummary;
+
+  if (summary.status === "completed") {
+    return `${document.chunkCount} chunks · ${document.parserName}`;
+  }
+
+  if (summary.status === "failed") {
+    return summary.errorMessage ?? document.lastError ?? "Import failed before completion";
+  }
+
+  return summary.latestEventMessage ?? getDocumentStageLabel(summary.stage);
+}
+
+function formatStatusTimestamp(value: string | null) {
+  if (!value) {
+    return null;
+  }
+
+  return new Date(value).toLocaleString();
+}
 
 export default function DatabaseConsole() {
   const [health, setHealth] = useState<Record<string, string>>({});
@@ -61,41 +232,116 @@ export default function DatabaseConsole() {
   const [isPending, startTransition] = useTransition();
   const location = useLocation();
   const navigate = useNavigate();
+  const hasActiveImports = documents.some((document) => isDocumentImportActive(document.statusSummary.status));
+  const previousHasActiveImportsRef = useRef(false);
+
+  const resolveFocusedDocumentId = (documentResult: DocumentRecord[], preferredDocumentId?: string) => {
+    if (preferredDocumentId && documentResult.some((document) => document.documentId === preferredDocumentId)) {
+      return preferredDocumentId;
+    }
+
+    if (selectedDocument && documentResult.some((document) => document.documentId === selectedDocument.documentId)) {
+      return selectedDocument.documentId;
+    }
+
+    return documentResult[0]?.documentId;
+  };
+
+  const loadFocusedDocumentDetail = async (
+    documentResult: DocumentRecord[],
+    preferredDocumentId?: string,
+    silent = false
+  ) => {
+    const focusedDocumentId = resolveFocusedDocumentId(documentResult, preferredDocumentId);
+    if (!focusedDocumentId) {
+      return null;
+    }
+
+    try {
+      return await MemoryService.getDocumentDetail(focusedDocumentId);
+    } catch (error) {
+      if (!silent) {
+        toast.error(error instanceof Error ? error.message : "Failed to load document detail");
+      }
+      return selectedDocument && documentResult.some((document) => document.documentId === selectedDocument.documentId)
+        ? selectedDocument
+        : null;
+    }
+  };
 
   useEffect(() => {
     void refreshAll();
   }, []);
 
-  const refreshAll = async () => {
-    startTransition(async () => {
-      try {
-        const [healthResult, metricsResult, documentResult, stmResult, graphResult, ltmResult, jobResult, eventResult] = await Promise.all([
-          MemoryService.testConnection(),
-          MemoryService.getOverviewMetrics(),
-          MemoryService.listDocuments(),
-          MemoryService.listStmEntries({ page: 1, pageSize: 20 }),
-          MemoryService.getGraph(),
-          MemoryService.listLtmFacts(1, 20),
-          MemoryService.listJobs(50),
-          MemoryService.listPipelineEvents({ limit: 50 }),
-        ]);
+  useEffect(() => {
+    if (!hasActiveImports) {
+      return;
+    }
 
-        setHealth(healthResult.services);
-        setMetrics(metricsResult);
-        setDocuments(documentResult);
-        setStm(stmResult);
-        setGraph(graphResult);
-        setLtm(ltmResult);
-        setJobs(jobResult);
-        setEvents(eventResult);
+    const intervalId = window.setInterval(() => {
+      void refreshDocumentStatus({ silent: true });
+    }, 2500);
 
-        if (documentResult[0] && !selectedDocument) {
-          const detail = await MemoryService.getDocumentDetail(documentResult[0].documentId);
-          setSelectedDocument(detail);
-        }
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Failed to refresh console data");
+    return () => window.clearInterval(intervalId);
+  }, [hasActiveImports, selectedDocument?.documentId]);
+
+  useEffect(() => {
+    if (previousHasActiveImportsRef.current && !hasActiveImports) {
+      void refreshAll(selectedDocument?.documentId);
+    }
+
+    previousHasActiveImportsRef.current = hasActiveImports;
+  }, [hasActiveImports, selectedDocument?.documentId]);
+
+  const refreshDocumentStatus = async (options?: { preferredDocumentId?: string; silent?: boolean }) => {
+    try {
+      const [documentResult, jobResult, eventResult] = await Promise.all([
+        MemoryService.listDocuments(),
+        MemoryService.listJobs(50),
+        MemoryService.listPipelineEvents({ limit: 50 }),
+      ]);
+      const detailResult = await loadFocusedDocumentDetail(documentResult, options?.preferredDocumentId, options?.silent ?? false);
+
+      setDocuments(documentResult);
+      setJobs(jobResult);
+      setEvents(eventResult);
+      setSelectedDocument(detailResult);
+    } catch (error) {
+      if (!options?.silent) {
+        toast.error(error instanceof Error ? error.message : "Failed to refresh document status");
       }
+    }
+  };
+
+  const refreshAll = async (preferredDocumentId?: string) => {
+    startTransition(() => {
+      void (async () => {
+        try {
+          const [healthResult, metricsResult, documentResult, stmResult, graphResult, ltmResult, jobResult, eventResult] = await Promise.all([
+            MemoryService.testConnection(),
+            MemoryService.getOverviewMetrics(),
+            MemoryService.listDocuments(),
+            MemoryService.listStmEntries({ page: 1, pageSize: 20 }),
+            MemoryService.getGraph(),
+            MemoryService.listLtmFacts(1, 20),
+            MemoryService.listJobs(50),
+            MemoryService.listPipelineEvents({ limit: 50 }),
+          ]);
+          const detailResult = await loadFocusedDocumentDetail(documentResult, preferredDocumentId);
+
+          setHealth(healthResult.services);
+          setMetrics(metricsResult);
+          setDocuments(documentResult);
+          setStm(stmResult);
+          setGraph(graphResult);
+          setLtm(ltmResult);
+          setJobs(jobResult);
+          setEvents(eventResult);
+          setSelectedDocument(detailResult);
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "Failed to refresh console data");
+        }
+      })();
     });
   };
 
@@ -105,31 +351,35 @@ export default function DatabaseConsole() {
       return;
     }
 
-    startTransition(async () => {
-      try {
-        await MemoryService.importDocuments(selectedFiles);
-        toast.success("Documents sent to the ingestion pipeline");
-        setSelectedFiles([]);
-        await refreshAll();
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Document import failed");
-      }
+    startTransition(() => {
+      void (async () => {
+        try {
+          const result = await MemoryService.importDocuments(selectedFiles);
+          toast.success(result.documents.length === 1 ? "Document queued for ingestion" : "Documents queued for ingestion");
+          setSelectedFiles([]);
+          await refreshAll(result.documents[0]?.documentId);
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "Document import failed");
+        }
+      })();
     });
   };
 
   const handleSleepCycle = async () => {
-    startTransition(async () => {
-      try {
-        const result = await MemoryService.runSleepCycle();
-        if (result) {
-          toast.success(`Sleep-cycle pruned ${result.pruned} nodes and distilled ${result.consolidated} facts`);
-        } else {
-          toast.info("Not enough MTM nodes for consolidation yet");
+    startTransition(() => {
+      void (async () => {
+        try {
+          const result = await MemoryService.runSleepCycle();
+          if (result) {
+            toast.success(`Sleep-cycle pruned ${result.pruned} nodes and distilled ${result.consolidated} facts`);
+          } else {
+            toast.info("Not enough MTM nodes for consolidation yet");
+          }
+          await refreshAll();
+        } catch (error) {
+          toast.error(error instanceof Error ? error.message : "Sleep-cycle failed");
         }
-        await refreshAll();
-      } catch (error) {
-        toast.error(error instanceof Error ? error.message : "Sleep-cycle failed");
-      }
+      })();
     });
   };
 
@@ -250,6 +500,7 @@ export default function DatabaseConsole() {
                   selectedFiles={selectedFiles}
                   setSelectedFiles={setSelectedFiles}
                   handleUpload={handleUpload}
+                  isPending={isPending}
                   openDocument={openDocument}
                 />
               }
@@ -388,6 +639,7 @@ function DocumentsView({
   selectedFiles,
   setSelectedFiles,
   handleUpload,
+  isPending,
   openDocument,
 }: {
   documents: DocumentRecord[];
@@ -395,15 +647,18 @@ function DocumentsView({
   selectedFiles: File[];
   setSelectedFiles: (files: File[]) => void;
   handleUpload: () => Promise<void>;
+  isPending: boolean;
   openDocument: (documentId: string) => Promise<void>;
 }) {
+  const statusCounts = getDocumentStatusCounts(documents);
+
   return (
     <div className="grid gap-6 xl:grid-cols-[0.9fr_1.1fr]">
       <div className="space-y-6">
         <Card className="border-white/10 bg-white/[0.04] text-neutral-100 shadow-none">
           <CardHeader>
             <CardTitle>Doc Import Workspace</CardTitle>
-            <CardDescription className="text-neutral-400">Upload one or more files into STM through the Docling ingestion flow.</CardDescription>
+            <CardDescription className="text-neutral-400">Upload one or more files into STM, then track parse, chunking, and MTM promotion as each document moves through the pipeline.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <label className="flex min-h-44 cursor-pointer flex-col items-center justify-center rounded-[16px] border border-dashed border-zinc-300/30 bg-neutral-950/42 px-6 text-center transition-all duration-150 hover:border-zinc-300/70 hover:bg-neutral-950/72 hover:shadow-[0_18px_40px_rgba(14,165,233,0.12)] active:scale-[0.998]">
@@ -428,8 +683,8 @@ function DocumentsView({
                     </div>
                   ))}
                 </div>
-                <Button className="mt-4 bg-zinc-300 text-neutral-950 hover:bg-zinc-200" onClick={() => void handleUpload()}>
-                  Start Import
+                <Button className="mt-4 bg-zinc-300 text-neutral-950 hover:bg-zinc-200" disabled={isPending} onClick={() => void handleUpload()}>
+                  {isPending ? "Queueing import..." : "Queue Import"}
                 </Button>
               </div>
             ) : null}
@@ -439,25 +694,64 @@ function DocumentsView({
         <Card className="border-white/10 bg-white/[0.04] text-neutral-100 shadow-none">
           <CardHeader>
             <CardTitle>Imported Documents</CardTitle>
-            <CardDescription className="text-neutral-400">Persisted document records and parse state</CardDescription>
+            <CardDescription className="text-neutral-400">Persisted document records with current upload, chunking, and MTM promotion state.</CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
-            {documents.map((document) => (
-              <button
-                key={document.documentId}
-                type="button"
-                className="w-full rounded-[16px] border border-white/10 bg-neutral-950/40 p-4 text-left transition-all duration-150 hover:border-zinc-300/35 hover:bg-neutral-950/72 active:scale-[0.995]"
-                onClick={() => void openDocument(document.documentId)}
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <p className="font-medium text-white">{document.filename}</p>
-                    <p className="text-sm text-neutral-400">{document.chunkCount} chunks · {document.parserName}</p>
+            {documents.length > 0 ? (
+              <div className="flex flex-wrap gap-2 pb-1">
+                {[
+                  { status: "queued", label: "Queued" },
+                  { status: "running", label: "Running" },
+                  { status: "completed", label: "Completed" },
+                  { status: "failed", label: "Failed" },
+                ].map(({ status, label }) =>
+                  statusCounts[status] ? (
+                    <div key={status} className={`rounded-full border px-3 py-1 text-xs uppercase tracking-[0.22em] ${getDocumentStatusBadgeClass(status)}`}>
+                      {statusCounts[status]} {label}
+                    </div>
+                  ) : null
+                )}
+              </div>
+            ) : null}
+            {documents.length === 0 ? (
+              <div className="rounded-[16px] border border-dashed border-white/10 bg-neutral-950/30 px-4 py-10 text-center text-sm text-neutral-400">
+                No documents have been imported yet.
+              </div>
+            ) : null}
+            {documents.map((document) => {
+              const summary = document.statusSummary;
+              const updatedAt = formatStatusTimestamp(summary.latestEventAt ?? summary.updatedAt);
+
+              return (
+                <button
+                  key={document.documentId}
+                  type="button"
+                  className="w-full rounded-[16px] border border-white/10 bg-neutral-950/40 p-4 text-left transition-all duration-150 hover:border-zinc-300/35 hover:bg-neutral-950/72 active:scale-[0.995]"
+                  onClick={() => void openDocument(document.documentId)}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="truncate font-medium text-white">{document.filename}</p>
+                      <p className="mt-1 text-sm text-neutral-400">{getDocumentStageLabel(summary.stage)} · {summary.progress}%</p>
+                    </div>
+                    <Badge className={getDocumentStatusBadgeClass(summary.status)}>{summary.status}</Badge>
                   </div>
-                  <Badge className="bg-white/10 text-neutral-100">{document.importStatus}</Badge>
-                </div>
-              </button>
-            ))}
+
+                  <div className="mt-4 h-2 overflow-hidden rounded-full bg-white/10">
+                    <div className={`h-full rounded-full ${getDocumentProgressBarClass(summary.status)}`} style={{ width: `${getDocumentProgressValue(summary)}%` }} />
+                  </div>
+
+                  <div className="mt-3 flex flex-wrap items-center justify-between gap-3 text-xs uppercase tracking-[0.2em] text-neutral-500">
+                    <span>{updatedAt ? `Updated ${updatedAt}` : getDocumentStageLabel(summary.stage)}</span>
+                    {summary.status === "completed" ? <span>{document.chunkCount} chunks</span> : <span>{getDocumentStageLabel(summary.stage)}</span>}
+                  </div>
+
+                  <p className={`mt-2 text-sm ${summary.status === "failed" ? "text-rose-300" : "text-neutral-300"}`}>
+                    {getDocumentMetaLine(document)}
+                  </p>
+                </button>
+              );
+            })}
           </CardContent>
         </Card>
       </div>
@@ -476,10 +770,12 @@ function DocumentsView({
                     <h3 className="text-xl font-semibold text-white">{selectedDocument.filename}</h3>
                     <p className="mt-1 text-sm text-neutral-400">{selectedDocument.mimeType} · {formatBytes(selectedDocument.fileSizeBytes)}</p>
                   </div>
-                  <Badge className="bg-zinc-300 text-neutral-950">{selectedDocument.importStatus}</Badge>
+                  <Badge className={getDocumentStatusBadgeClass(selectedDocument.statusSummary.status)}>{selectedDocument.statusSummary.status}</Badge>
                 </div>
                 {selectedDocument.summary ? <p className="mt-4 text-sm text-neutral-300">{selectedDocument.summary}</p> : null}
               </div>
+
+              <DocumentImportStatusPanel document={selectedDocument} />
 
               <div className="grid gap-6 lg:grid-cols-2">
                 <div>
@@ -524,6 +820,71 @@ function DocumentsView({
           )}
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+function DocumentImportStatusPanel({ document }: { document: DocumentRecord | DocumentDetail }) {
+  const summary = document.statusSummary;
+  const updatedAt = formatStatusTimestamp(summary.latestEventAt ?? summary.updatedAt);
+
+  return (
+    <div className="rounded-[16px] border border-white/10 bg-neutral-900/50 p-5">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-xs uppercase tracking-[0.22em] text-neutral-500">Import Status</p>
+          <h4 className="mt-2 text-lg font-semibold text-white">{getDocumentStageLabel(summary.stage)}</h4>
+          <p className="mt-1 text-sm text-neutral-400">
+            {summary.status === "completed"
+              ? `${document.chunkCount} chunks are loaded and MTM promotion has completed.`
+              : summary.status === "failed"
+                ? "The import stopped before all promotion steps completed."
+                : `${summary.progress}% through the current ingestion flow.`}
+          </p>
+        </div>
+        <Badge className={getDocumentStatusBadgeClass(summary.status)}>{summary.status}</Badge>
+      </div>
+
+      <div className="mt-4 h-2 overflow-hidden rounded-full bg-white/10">
+        <div className={`h-full rounded-full ${getDocumentProgressBarClass(summary.status)}`} style={{ width: `${getDocumentProgressValue(summary)}%` }} />
+      </div>
+
+      <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+        {documentImportSteps.map((step) => {
+          const stepState = getDocumentStepState(summary, step.stage);
+
+          return (
+            <div key={step.stage} className={`rounded-[14px] border p-3 ${getDocumentStepCardClass(stepState)}`}>
+              <div className="flex items-center gap-2">
+                {stepState === "complete" ? (
+                  <CheckCircle2 className="h-4 w-4 text-emerald-300" />
+                ) : stepState === "current" ? (
+                  <LoaderCircle className="h-4 w-4 animate-spin text-zinc-300" />
+                ) : stepState === "error" ? (
+                  <AlertTriangle className="h-4 w-4 text-rose-300" />
+                ) : (
+                  <div className="h-2.5 w-2.5 rounded-full bg-white/20" />
+                )}
+                <p className={`text-sm font-medium ${getDocumentStepTextClass(stepState)}`}>{step.label}</p>
+              </div>
+              <p className="mt-2 text-xs uppercase tracking-[0.2em] text-neutral-500">
+                {stepState === "complete" ? "done" : stepState === "current" ? "active" : stepState === "error" ? "error" : "pending"}
+              </p>
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="mt-4 rounded-[14px] border border-white/10 bg-white/[0.03] p-4">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="text-xs uppercase tracking-[0.22em] text-neutral-500">Latest activity</p>
+            <p className="mt-2 text-sm text-neutral-200">{summary.latestEventMessage ?? getDocumentMetaLine(document)}</p>
+          </div>
+          {updatedAt ? <p className="text-xs uppercase tracking-[0.22em] text-neutral-500">{updatedAt}</p> : null}
+        </div>
+        {summary.errorMessage ? <p className="mt-3 text-sm text-rose-300">{summary.errorMessage}</p> : null}
+      </div>
     </div>
   );
 }

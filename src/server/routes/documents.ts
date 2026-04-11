@@ -31,7 +31,7 @@ router.post("/import", upload.array("files", 10), async (req, res) => {
     }
 
     const imported = await importUploadedDocuments(files);
-    res.status(201).json({ documents: imported });
+    res.status(202).json({ documents: imported });
   } catch (error) {
     console.error("Document import error:", error);
     res.status(500).json({ error: error instanceof Error ? error.message : "Failed to import documents" });
