@@ -66,7 +66,7 @@ interface LatestJobRow {
   stage: string;
   progress: number;
   error_message: string | null;
-  updated_at: Date;
+  updated_at: Date | string;
 }
 
 interface LatestEventRow {
@@ -74,7 +74,7 @@ interface LatestEventRow {
   stage: string;
   level: string;
   message: string;
-  created_at: Date;
+  created_at: Date | string;
 }
 
 export async function importUploadedDocuments(files: Express.Multer.File[]) {
@@ -361,7 +361,7 @@ function buildDocumentImportStatusSummary(
   const status = latestJob?.status ?? row.importStatus;
   const stage = latestJob?.stage ?? (status === "completed" ? "completed" : status === "failed" ? "failed" : "uploaded");
   const progress = latestJob?.progress ?? (status === "completed" ? 100 : 0);
-  const updatedAt = latestJob?.updated_at?.toISOString() ?? row.updatedAt.toISOString();
+  const updatedAt = normalizeTimestamp(latestJob?.updated_at) ?? row.updatedAt.toISOString();
 
   return {
     jobId: latestJob?.job_id ?? null,
@@ -372,9 +372,21 @@ function buildDocumentImportStatusSummary(
     latestEventMessage: latestEvent?.message ?? null,
     latestEventStage: latestEvent?.stage ?? null,
     latestEventLevel: latestEvent?.level ?? null,
-    latestEventAt: latestEvent?.created_at?.toISOString() ?? null,
+    latestEventAt: normalizeTimestamp(latestEvent?.created_at),
     updatedAt,
   };
+}
+
+function normalizeTimestamp(value: Date | string | undefined | null) {
+  if (!value) {
+    return null;
+  }
+
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  return new Date(value).toISOString();
 }
 
 export async function listDocuments(options?: { limit?: number }) {
