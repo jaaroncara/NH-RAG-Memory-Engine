@@ -1,7 +1,12 @@
 FROM python:3.11-slim
 
+ARG TORCH_VERSION=2.7.1+cpu
+ARG TORCHVISION_VERSION=0.22.1
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+    PYTHONUNBUFFERED=1 \
+    PIP_DEFAULT_TIMEOUT=300 \
+    PIP_RETRIES=10
 
 WORKDIR /app
 
@@ -17,7 +22,11 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --progress-bar off \
+    --index-url https://download.pytorch.org/whl/cpu \
+    "torch==${TORCH_VERSION}" \
+    "torchvision==${TORCHVISION_VERSION}"
+RUN pip install --no-cache-dir --progress-bar off -r requirements.txt
 
 COPY app.py ./app.py
 

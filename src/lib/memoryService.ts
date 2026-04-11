@@ -208,6 +208,15 @@ export interface QueryExecutionResult extends Omit<QueryInspectionResult, "mode"
   counters?: Record<string, number>;
 }
 
+export interface ClearKnowledgeBasesResult {
+  message: string;
+  clearedAt: string;
+  sqlQuery: string;
+  cypherQuery: string;
+  sqlResult: QueryExecutionResult;
+  cypherResult: QueryExecutionResult;
+}
+
 const API = "/api";
 
 async function json<T>(res: Response): Promise<T> {
@@ -253,6 +262,15 @@ export class MemoryService {
       body: JSON.stringify({ query, ...options }),
     });
     return json<QueryExecutionResult>(res);
+  }
+
+  static async clearAllKnowledgeBases(confirmation: string): Promise<ClearKnowledgeBasesResult> {
+    const res = await fetch(`${API}/query/clear-all`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirmation }),
+    });
+    return json<ClearKnowledgeBasesResult>(res);
   }
 
   static async listDocuments(): Promise<DocumentRecord[]> {

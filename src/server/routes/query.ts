@@ -7,6 +7,11 @@ import {
   inspectCypherQuery,
   inspectSqlQuery,
 } from "../services/queryExecutionService.js";
+import {
+  CLEAR_ALL_CYPHER_SNIPPET,
+  CLEAR_ALL_SQL_SNIPPET,
+  KNOWLEDGE_BASE_CLEAR_CONFIRMATION,
+} from "../../shared/knowledgeBaseReset.js";
 
 const router = Router();
 
@@ -14,6 +19,10 @@ const querySchema = z.object({
   query: z.string().min(1).max(20_000),
   timeoutMs: z.number().int().positive().max(15_000).optional(),
   maxRows: z.number().int().positive().max(250).optional(),
+});
+
+const clearAllSchema = z.object({
+  confirmation: z.literal(KNOWLEDGE_BASE_CLEAR_CONFIRMATION),
 });
 
 router.post("/sql/inspect", async (req, res) => {
@@ -53,6 +62,33 @@ router.post("/cypher/execute", async (req, res) => {
     res.json(result);
   } catch (error) {
     handleRouteError(res, "Cypher execute failed", error);
+  }
+});
+
+router.post("/clear-all", async (req, res) => {
+  try {
+    clearAllSchema.parse(req.body);
+
+    // Clear the derived graph first so a partial failure leaves the primary stores intact.
+    const cypherResult = await executeCypherQuery(CLEAR_ALL_CYPHER_SNIPPET, {
+      timeoutMs: 15_000,
+      maxRows: 25,
+    });
+    const sqlResult = await executeSqlQuery(CLEAR_ALL_SQL_SNIPPET, {
+      timeoutMs: 15_000,
+      maxRows: 25,
+    });
+
+    res.json({
+      message: "All knowledge bases cleared. Tables, indexes, constraints, and graph schema remain intact.",
+      clearedAt: new Date().toISOString(),
+      sqlQuery: CLEAR_ALL_SQL_SNIPPET,
+      cypherQuery: CLEAR_ALL_CYPHER_SNIPPET,
+      sqlResult,
+      cypherResult,
+    });
+  } catch (error) {
+    handleRouteError(res, "Clear-all knowledge base action failed", error);
   }
 });
 

@@ -4,15 +4,22 @@ import { toast } from "sonner";
 import { Badge } from "../../components/ui/badge";
 import { Button } from "../../components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "../../components/ui/card";
+import { Input } from "../../components/ui/input";
 import { ScrollArea } from "../../components/ui/scroll-area";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "../../components/ui/tabs";
 import { cn } from "../../lib/utils";
 import {
   MemoryService,
+  type ClearKnowledgeBasesResult,
   type QueryEngine,
   type QueryExecutionResult,
   type QueryInspectionResult,
 } from "../lib/memoryService";
+import {
+  CLEAR_ALL_CYPHER_SNIPPET,
+  CLEAR_ALL_SQL_SNIPPET,
+  KNOWLEDGE_BASE_CLEAR_CONFIRMATION,
+} from "../shared/knowledgeBaseReset";
 
 const HISTORY_STORAGE_KEY = "nhrag.query-console.history";
 const HISTORY_LIMIT = 24;
@@ -66,6 +73,9 @@ export default function QueryConsoleView({
     cypher: initialEngineState("cypher"),
   });
   const [history, setHistory] = useState<QueryHistoryEntry[]>(loadHistory);
+  const [resetConfirmation, setResetConfirmation] = useState("");
+  const [isClearingAll, setIsClearingAll] = useState(false);
+  const [clearResult, setClearResult] = useState<ClearKnowledgeBasesResult | null>(null);
 
   useEffect(() => {
     if (typeof window === "undefined") {
@@ -232,6 +242,63 @@ export default function QueryConsoleView({
     setHistory([]);
   };
 
+  const handleClearAllKnowledgeBases = async () => {
+    if (resetConfirmation.trim() !== KNOWLEDGE_BASE_CLEAR_CONFIRMATION) {
+      toast.error(`Type ${KNOWLEDGE_BASE_CLEAR_CONFIRMATION} to enable the reset action.`);
+      return;
+    }
+
+    setIsClearingAll(true);
+
+    try {
+      const result = await MemoryService.clearAllKnowledgeBases(resetConfirmation.trim());
+
+      setClearResult(result);
+      setResetConfirmation("");
+      updateEngine("sql", {
+        query: result.sqlQuery,
+        inspection: toInspectionResult(result.sqlResult),
+        result: result.sqlResult,
+        confirmArmed: false,
+      });
+      updateEngine("cypher", {
+        query: result.cypherQuery,
+        inspection: toInspectionResult(result.cypherResult),
+        result: result.cypherResult,
+        confirmArmed: false,
+      });
+
+      recordHistoryEntry({
+        engine: "cypher",
+        action: "execute",
+        statementType: result.cypherResult.statementType,
+        status: "success",
+        summary: "Cleared Neo4j knowledge graph from the Data Console danger zone",
+        query: result.cypherQuery,
+        isDestructive: true,
+        rowCount: result.cypherResult.rowCount,
+      });
+      recordHistoryEntry({
+        engine: "sql",
+        action: "execute",
+        statementType: result.sqlResult.statementType,
+        status: "success",
+        summary: "Cleared PostgreSQL knowledge stores from the Data Console danger zone",
+        query: result.sqlQuery,
+        isDestructive: true,
+        rowCount: result.sqlResult.rowCount,
+      });
+
+      await onDataMutation?.();
+      toast.success(result.message);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Clear-all reset failed";
+      toast.error(message);
+    } finally {
+      setIsClearingAll(false);
+    }
+  };
+
   const recordHistoryEntry = (entry: Omit<QueryHistoryEntry, "id" | "createdAt">) => {
     const nextEntry: QueryHistoryEntry = {
       ...entry,
@@ -289,6 +356,150 @@ export default function QueryConsoleView({
           </Tabs>
         </CardContent>
       </Card>
+
+      <KnowledgeBaseResetPanel
+        confirmation={resetConfirmation}
+        onConfirmationChange={setResetConfirmation}
+        onClearAll={() => void handleClearAllKnowledgeBases()}
+        isClearingAll={isClearingAll}
+        isQueryPending={engines.sql.isInspecting || engines.sql.isExecuting || engines.cypher.isInspecting || engines.cypher.isExecuting}
+        lastResult={clearResult}
+      />
+    </div>
+  );
+}
+
+function KnowledgeBaseResetPanel({
+  confirmation,
+  onConfirmationChange,
+  onClearAll,
+  isClearingAll,
+  isQueryPending,
+  lastResult,
+}: {
+  confirmation: string;
+  onConfirmationChange: (value: string) => void;
+  onClearAll: () => void;
+  isClearingAll: boolean;
+  isQueryPending: boolean;
+  lastResult: ClearKnowledgeBasesResult | null;
+}) {
+  const isConfirmed = confirmation.trim() === KNOWLEDGE_BASE_CLEAR_CONFIRMATION;
+
+  return (
+    <Card className="border-rose-500/18 bg-white/[0.03] text-neutral-100 shadow-none">
+      <CardHeader>
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge className="bg-rose-200/90 text-rose-950">Danger Zone</Badge>
+          <Badge className="bg-white/10 text-neutral-100">Irreversible</Badge>
+          <Badge className="bg-white/10 text-neutral-100">Schema Preserved</Badge>
+        </div>
+        <CardTitle className="mt-3 text-rose-100">Clear all knowledge bases</CardTitle>
+        <CardDescription className="text-neutral-400">
+          This removes all STM, documents, chunks, jobs, pipeline events, LTM facts, and the full Neo4j MTM graph while preserving tables, indexes, constraints, extensions, and graph schema.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="grid gap-5 xl:grid-cols-[1.1fr_0.9fr]">
+          <div className="space-y-4">
+            <div className="rounded-[16px] border border-rose-500/16 bg-rose-500/[0.05] p-4">
+              <p className="text-sm leading-6 text-neutral-200">
+                Use this only when you intend to reset every knowledge store. The action cannot be undone from the console.
+              </p>
+            </div>
+
+            <div className="grid gap-4 lg:grid-cols-2">
+              <SnippetPanel title="SQL reset snippet" code={CLEAR_ALL_SQL_SNIPPET} />
+              <SnippetPanel title="Cypher reset snippet" code={CLEAR_ALL_CYPHER_SNIPPET} />
+            </div>
+
+            <div className="rounded-[16px] border border-rose-500/20 bg-black/20 p-4">
+              <p className="text-xs uppercase tracking-[0.24em] text-rose-200/70">Confirmation</p>
+              <p className="mt-2 text-sm text-neutral-300">
+                Type {KNOWLEDGE_BASE_CLEAR_CONFIRMATION} to enable the reset button.
+              </p>
+              <div className="mt-3 flex flex-col gap-3 md:flex-row">
+                <Input
+                  value={confirmation}
+                  onChange={(event) => onConfirmationChange(event.target.value)}
+                  placeholder={KNOWLEDGE_BASE_CLEAR_CONFIRMATION}
+                  className="border-rose-500/18 bg-black/25 text-neutral-100 placeholder:text-neutral-500 focus-visible:border-rose-400/50 focus-visible:ring-rose-400/16"
+                />
+                <Button
+                  className="bg-rose-700 text-white hover:bg-rose-600 focus-visible:border-rose-300/50 focus-visible:ring-rose-400/22"
+                  onClick={onClearAll}
+                  disabled={!isConfirmed || isClearingAll || isQueryPending}
+                >
+                  {isClearingAll ? "Clearing data..." : "Clear All Knowledge Bases"}
+                </Button>
+              </div>
+            </div>
+          </div>
+
+          <div className="rounded-[16px] border border-white/10 bg-black/20 p-4">
+            <p className="text-xs uppercase tracking-[0.24em] text-neutral-500">Last reset status</p>
+            {lastResult ? (
+              <div className="mt-4 space-y-4 text-sm text-neutral-200">
+                <div className="rounded-[14px] border border-white/10 bg-white/[0.03] p-4">
+                  <p className="font-medium text-white">{lastResult.message}</p>
+                  <p className="mt-2 text-neutral-400">Executed {new Date(lastResult.clearedAt).toLocaleString()}</p>
+                </div>
+                <ResetResultSummary label="Neo4j" result={lastResult.cypherResult} />
+                <ResetResultSummary label="PostgreSQL" result={lastResult.sqlResult} />
+              </div>
+            ) : (
+              <div className="mt-4 rounded-[14px] border border-dashed border-white/10 p-4 text-sm text-neutral-400">
+                No full reset has been executed in this browser session.
+              </div>
+            )}
+          </div>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+function SnippetPanel({
+  title,
+  code,
+}: {
+  title: string;
+  code: string;
+}) {
+  return (
+    <div className="rounded-[16px] border border-white/10 bg-black/25 p-4">
+      <p className="text-xs uppercase tracking-[0.24em] text-neutral-500">{title}</p>
+      <pre className="mt-3 overflow-x-auto whitespace-pre-wrap rounded-[12px] bg-neutral-950/70 p-3 font-mono text-xs text-neutral-100">
+        {code}
+      </pre>
+    </div>
+  );
+}
+
+function ResetResultSummary({
+  label,
+  result,
+}: {
+  label: string;
+  result: QueryExecutionResult;
+}) {
+  return (
+    <div className="rounded-[14px] border border-white/10 bg-white/[0.03] p-4">
+      <div className="flex flex-wrap items-center gap-2">
+        <Badge className="bg-white/10 text-neutral-100">{label}</Badge>
+        <Badge className="bg-rose-300/90 text-rose-950">{result.statementType}</Badge>
+        <Badge className="bg-white/10 text-neutral-100">{result.executionTimeMs} ms</Badge>
+      </div>
+      <p className="mt-3 text-sm text-neutral-300">{result.summary}</p>
+      {result.warnings.length > 0 ? (
+        <div className="mt-3 space-y-2">
+          {result.warnings.map((warning) => (
+            <p key={warning} className="text-xs text-amber-100/90">
+              {warning}
+            </p>
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }
