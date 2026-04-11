@@ -102,11 +102,9 @@ function getDocumentStatusBadgeClass(status: string) {
 function getDocumentProgressBarClass(status: string) {
   switch (status) {
     case "completed":
-      return "bg-emerald-300";
     case "failed":
-      return "bg-rose-300";
     default:
-      return "bg-zinc-300";
+      return "bg-white";
   }
 }
 
@@ -1478,7 +1476,7 @@ function JobsView({ jobs, events }: { jobs: JobRecord[]; events: PipelineEvent[]
                 <Badge className="bg-white/10 text-neutral-100">{job.status}</Badge>
               </div>
               <div className="mt-4 h-2 overflow-hidden rounded-full bg-white/10">
-                <div className="h-full rounded-full bg-zinc-300" style={{ width: `${job.progress}%` }} />
+                <div className="h-full rounded-full bg-white" style={{ width: `${job.progress}%` }} />
               </div>
               {job.errorMessage ? <p className="mt-3 text-sm text-rose-300">{job.errorMessage}</p> : null}
             </div>
