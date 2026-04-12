@@ -1,17 +1,12 @@
-// NH-RAG Frontend Memory Service — HTTP client for Express API
+// NH-RAG frontend API client
 
-export enum Actor {
-  USER = "user",
-  AGENT = "agent",
-  SYSTEM = "system",
-  DOCUMENT = "document",
-}
+export type EpisodicActor = "user" | "agent" | "system" | "document";
 
 export interface EpisodicMemory {
   interactionId?: string;
   sessionId: string;
   timestamp: string;
-  actor: Actor;
+  actor: EpisodicActor;
   rawText: string;
   sourceType?: string;
   documentId?: string | null;
@@ -315,35 +310,10 @@ export class MemoryService {
     return json<DocumentDetail>(res);
   }
 
-  // STM
-  static async addEpisodicLog(
-    sessionId: string,
-    actor: Actor,
-    rawText: string
-  ): Promise<string | undefined> {
-    const res = await fetch(`${API}/stm/log`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sessionId, actor, rawText }),
-    });
-    const data = await json<{ interactionId: string }>(res);
-    return data.interactionId;
-  }
-
-  static async getRecentContext(
-    sessionId: string,
-    limitCount: number = 10
-  ): Promise<EpisodicMemory[]> {
-    const res = await fetch(
-      `${API}/stm/context/${encodeURIComponent(sessionId)}?limit=${limitCount}`
-    );
-    return json<EpisodicMemory[]>(res);
-  }
-
   static async listStmEntries(options?: {
     page?: number;
     pageSize?: number;
-    actor?: Actor;
+    actor?: EpisodicActor;
     documentId?: string;
     query?: string;
   }): Promise<{ entries: EpisodicMemory[]; total: number }> {
@@ -356,20 +326,6 @@ export class MemoryService {
 
     const res = await fetch(`${API}/stm/entries?${params.toString()}`);
     return json<{ entries: EpisodicMemory[]; total: number }>(res);
-  }
-
-  // MTM
-  static async consolidateToMTM(
-    interactionId: string,
-    content: string
-  ): Promise<string | undefined> {
-    const res = await fetch(`${API}/mtm/consolidate`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ interactionId, content }),
-    });
-    const data = await json<{ nodeId: string }>(res);
-    return data.nodeId;
   }
 
   static async getGraph(limitCount?: number): Promise<GraphSnapshot> {
@@ -385,17 +341,6 @@ export class MemoryService {
       method: "POST",
     });
     return json<SleepCycleLaunchResult>(res);
-  }
-
-  // LTM
-  static async searchLTM(
-    queryText: string,
-    limitCount: number = 3
-  ): Promise<SemanticFact[]> {
-    const res = await fetch(
-      `${API}/ltm/search?q=${encodeURIComponent(queryText)}&limit=${limitCount}`
-    );
-    return json<SemanticFact[]>(res);
   }
 
   static async listLtmFacts(page: number = 1, pageSize: number = 20): Promise<{ facts: SemanticFact[]; total: number }> {
@@ -427,25 +372,5 @@ export class MemoryService {
   static async testConnection(): Promise<{ status: string; services: Record<string, string> }> {
     const res = await fetch(`${API}/health`);
     return json<{ status: string; services: Record<string, string> }>(res);
-  }
-
-  static async getStats(): Promise<{
-    stm: number;
-    mtm: number;
-    ltm: number;
-  }> {
-    const res = await fetch(`${API}/memory/stats`);
-    const data = await json<{
-      tiers: {
-        stm: { count: number };
-        mtm: { count: number };
-        ltm: { count: number };
-      };
-    }>(res);
-    return {
-      stm: data.tiers.stm.count,
-      mtm: data.tiers.mtm.count,
-      ltm: data.tiers.ltm.count,
-    };
   }
 }
