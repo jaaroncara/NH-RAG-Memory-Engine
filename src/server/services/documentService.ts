@@ -57,6 +57,7 @@ interface QueuedDocumentImport {
   file: Express.Multer.File;
   documentId: string;
   jobId: string;
+  documentMetadata: Record<string, unknown>;
 }
 
 interface LatestJobRow {
@@ -93,6 +94,15 @@ const DOCUMENT_IMPORT_PROGRESS = {
 } as const;
 
 export async function importUploadedDocuments(files: Express.Multer.File[]) {
+  return importUploadedDocumentsWithOptions(files);
+}
+
+export async function importUploadedDocumentsWithOptions(
+  files: Express.Multer.File[],
+  options?: {
+    metadata?: Record<string, unknown>;
+  }
+) {
   const imported: Array<typeof documents.$inferSelect> = [];
   const queuedImports: QueuedDocumentImport[] = [];
 
@@ -109,6 +119,8 @@ export async function importUploadedDocuments(files: Express.Multer.File[]) {
       continue;
     }
 
+    const documentMetadata = buildInitialDocumentMetadata(options?.metadata);
+
     const [document] = await db
       .insert(documents)
       .values({
@@ -116,9 +128,7 @@ export async function importUploadedDocuments(files: Express.Multer.File[]) {
         mimeType: file.mimetype || "application/octet-stream",
         checksum,
         fileSizeBytes: file.size,
-        metadata: {
-          uploadedAt: new Date().toISOString(),
-        },
+        metadata: documentMetadata,
       })
       .returning();
 
@@ -126,7 +136,7 @@ export async function importUploadedDocuments(files: Express.Multer.File[]) {
       documentId: document.documentId,
       jobType: "document_import",
       stage: "uploaded",
-      metadata: { filename: file.originalname },
+      metadata: buildImportJobMetadata(file.originalname, options?.metadata),
     });
 
     await recordPipelineEvent({
@@ -142,6 +152,7 @@ export async function importUploadedDocuments(files: Express.Multer.File[]) {
       file,
       documentId: document.documentId,
       jobId,
+      documentMetadata,
     });
   }
 
@@ -160,7 +171,7 @@ async function processQueuedDocumentBatch(queuedImports: QueuedDocumentImport[])
   }
 }
 
-async function processQueuedDocumentImport({ file, documentId, jobId }: QueuedDocumentImport) {
+async function processQueuedDocumentImport({ file, documentId, jobId, documentMetadata }: QueuedDocumentImport) {
   let currentStage = "uploaded";
 
   try {
@@ -392,6 +403,7 @@ async function processQueuedDocumentImport({ file, documentId, jobId }: QueuedDo
         lastError: null,
         updatedAt: new Date(),
         metadata: {
+          ...documentMetadata,
           parserName: parsed.parserName,
           sections: parsed.sections.length,
         },
@@ -652,5 +664,29 @@ function toDocumentRecord(
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
     statusSummary,
+  };
+}
+
+function buildInitialDocumentMetadata(metadata?: Record<string, unknown>) {
+  if (!metadata || Object.keys(metadata).length === 0) {
+    return {
+      uploadedAt: new Date().toISOString(),
+    };
+  }
+
+  return {
+    uploadedAt: new Date().toISOString(),
+    integration: metadata,
+  };
+}
+
+function buildImportJobMetadata(filename: string, metadata?: Record<string, unknown>) {
+  if (!metadata || Object.keys(metadata).length === 0) {
+    return { filename };
+  }
+
+  return {
+    filename,
+    integration: metadata,
   };
 }

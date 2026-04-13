@@ -111,14 +111,8 @@ export async function recordPipelineEvent(input: {
   });
 }
 
-export async function listJobs(limit = 50): Promise<JobRecord[]> {
-  const rows = await db
-    .select()
-    .from(ingestionJobs)
-    .orderBy(desc(ingestionJobs.createdAt))
-    .limit(limit);
-
-  return rows.map((row) => ({
+function toJobRecord(row: typeof ingestionJobs.$inferSelect): JobRecord {
+  return {
     jobId: row.jobId,
     documentId: row.documentId,
     jobType: row.jobType,
@@ -131,7 +125,27 @@ export async function listJobs(limit = 50): Promise<JobRecord[]> {
     metadata: row.metadata as Record<string, unknown>,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
-  }));
+  };
+}
+
+export async function getJob(jobId: string): Promise<JobRecord | null> {
+  const [row] = await db
+    .select()
+    .from(ingestionJobs)
+    .where(eq(ingestionJobs.jobId, jobId))
+    .limit(1);
+
+  return row ? toJobRecord(row) : null;
+}
+
+export async function listJobs(limit = 50): Promise<JobRecord[]> {
+  const rows = await db
+    .select()
+    .from(ingestionJobs)
+    .orderBy(desc(ingestionJobs.createdAt))
+    .limit(limit);
+
+  return rows.map(toJobRecord);
 }
 
 export async function listPipelineEvents(options?: {

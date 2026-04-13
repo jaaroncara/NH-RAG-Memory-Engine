@@ -9,15 +9,18 @@ import "./src/server/env.js";
 
 import { pool } from "./src/server/db/index.js";
 import { initNeo4j, closeNeo4j } from "./src/server/db/neo4j.js";
+import { getIntegrationRoutePrefix } from "./src/server/config/integration.js";
 import { getStmCount } from "./src/server/services/stmService.js";
 import { getMtmCount } from "./src/server/services/mtmService.js";
 import { getLtmCount } from "./src/server/services/ltmService.js";
+import { integrationAuthMiddleware } from "./src/server/middleware/integrationAuth.js";
 
 import stmRoutes from "./src/server/routes/stm.js";
 import mtmRoutes from "./src/server/routes/mtm.js";
 import ltmRoutes from "./src/server/routes/ltm.js";
 import consolidationRoutes from "./src/server/routes/consolidation.js";
 import documentRoutes from "./src/server/routes/documents.js";
+import integrationRoutes from "./src/server/routes/integration.js";
 import jobRoutes from "./src/server/routes/jobs.js";
 import metricsRoutes from "./src/server/routes/metrics.js";
 import queryRoutes from "./src/server/routes/query.js";
@@ -57,6 +60,7 @@ async function startServer() {
   app.use("/api/jobs", jobRoutes);
   app.use("/api/metrics", metricsRoutes);
   app.use("/api/query", queryRoutes);
+  app.use(getIntegrationRoutePrefix(), integrationAuthMiddleware, integrationRoutes);
 
   app.get("/api/health", async (req, res) => {
     const health: Record<string, string> = {};

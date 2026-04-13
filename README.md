@@ -156,6 +156,48 @@ User Input
    ```
    Opens at [http://localhost:3000](http://localhost:3000). This single process hosts both the Express backend and the Vite-powered frontend.
 
+## MCP Integration API
+
+This app now exposes a dedicated integration surface for external callers such as your MCP server. The existing `/api/*` routes remain in place for the operator console and internal/debug workflows, while the new integration layer is intended to be the stable service-to-service contract.
+
+Default base path:
+
+```text
+/api/v1/integration
+```
+
+Optional auth:
+
+- Set `INTEGRATION_API_KEYS` to a comma-separated list of API keys.
+- When configured, send either `X-API-Key: <key>` or `Authorization: Bearer <key>`.
+- If `INTEGRATION_API_KEYS` is empty, integration routes are left unauthenticated for local development.
+
+Current integration endpoints:
+
+- `GET /api/v1/integration/health`
+- `POST /api/v1/integration/chat-logs`
+- `POST /api/v1/integration/chat-logs/batch`
+- `GET /api/v1/integration/sessions/:sessionId/context`
+- `GET /api/v1/integration/ltm/search?q=...&limit=...`
+- `POST /api/v1/integration/retrieval/context`
+- `GET /api/v1/integration/documents`
+- `POST /api/v1/integration/documents/import`
+- `GET /api/v1/integration/documents/:documentId`
+- `GET /api/v1/integration/jobs`
+- `GET /api/v1/integration/jobs/:jobId`
+- `GET /api/v1/integration/jobs/:jobId/events`
+
+Recommended external usage pattern:
+
+1. Post chat turns into STM through `POST /api/v1/integration/chat-logs` or `/chat-logs/batch`.
+2. Fetch memory context through `POST /api/v1/integration/retrieval/context` when your MCP tool needs both recent STM and semantic LTM in one call.
+3. Upload documents through `POST /api/v1/integration/documents/import`, then poll `GET /api/v1/integration/jobs/:jobId` until completion.
+4. Read final document/chunk details through `GET /api/v1/integration/documents/:documentId`.
+
+Operator-only note:
+
+- The raw query-console routes under `/api/query/*` are not part of the integration contract and should not be exposed to external MCP callers.
+
 ## Starting Services
 
 ### 1. Infrastructure services
