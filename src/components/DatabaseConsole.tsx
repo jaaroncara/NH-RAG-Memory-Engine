@@ -5,12 +5,14 @@ import {
   AlertTriangle,
   ArrowUpRight,
   ChevronDown,
+  Copy,
   Database,
   FileStack,
   GitBranch,
   HardDriveUpload,
   CheckCircle2,
   LoaderCircle,
+  MessageSquare,
   Orbit,
   RefreshCw,
   ServerCog,
@@ -31,6 +33,7 @@ import QueryConsoleView from "./QueryConsoleView";
 const navItems = [
   { to: "/", label: "Overview", icon: Activity },
   { to: "/documents", label: "Document Loader", icon: HardDriveUpload },
+  { to: "/conversations", label: "Conversation Hook", icon: MessageSquare },
   { to: "/stm", label: "STM Base", icon: Database },
   { to: "/mtm", label: "MTM Network", icon: Orbit },
   { to: "/ltm", label: "LTM Store", icon: Sparkles },
@@ -607,12 +610,12 @@ export default function DatabaseConsole() {
 
   const chartData = metrics
     ? [
-        { label: "Documents", value: metrics.cards.documents },
-        { label: "Chunks", value: metrics.cards.chunks },
-        { label: "STM", value: metrics.cards.stm },
-        { label: "MTM", value: metrics.cards.mtm },
-        { label: "LTM", value: metrics.cards.ltm },
-      ]
+      { label: "Documents", value: metrics.cards.documents },
+      { label: "Chunks", value: metrics.cards.chunks },
+      { label: "STM", value: metrics.cards.stm },
+      { label: "MTM", value: metrics.cards.mtm },
+      { label: "LTM", value: metrics.cards.ltm },
+    ]
     : [];
 
   return (
@@ -634,10 +637,9 @@ export default function DatabaseConsole() {
                   to={item.to}
                   end={item.to === "/"}
                   className={({ isActive }) =>
-                    `flex items-center gap-3 rounded-[14px] border px-3 py-3 text-sm transition-all duration-150 ${
-                      isActive
-                        ? "border-zinc-300/35 bg-zinc-300/90 text-neutral-950 shadow-[0_12px_32px_rgba(56,189,248,0.24)]"
-                        : "border-transparent text-neutral-300 hover:border-white/10 hover:bg-white/6 hover:text-white active:scale-[0.99]"
+                    `flex items-center gap-3 rounded-[14px] border px-3 py-3 text-sm transition-all duration-150 ${isActive
+                      ? "border-zinc-300/35 bg-zinc-300/90 text-neutral-950 shadow-[0_12px_32px_rgba(56,189,248,0.24)]"
+                      : "border-transparent text-neutral-300 hover:border-white/10 hover:bg-white/6 hover:text-white active:scale-[0.99]"
                     }`
                   }
                 >
@@ -729,6 +731,7 @@ export default function DatabaseConsole() {
             <Route path="/mtm" element={<MtmView graph={graph} />} />
             <Route path="/ltm" element={<LtmView ltm={ltm} page={ltmPage} pageSize={LTM_PAGE_SIZE} refreshLtm={refreshLtm} />} />
             <Route path="/jobs" element={<JobsView jobs={jobs} events={events} />} />
+            <Route path="/conversations" element={<ConversationHookView />} />
           </Routes>
         </main>
       </div>
@@ -933,11 +936,10 @@ function DocumentsView({
                 <button
                   key={document.documentId}
                   type="button"
-                  className={`w-full rounded-[14px] border p-3 text-left transition-all duration-150 active:scale-[0.995] ${
-                    isSelected
+                  className={`w-full rounded-[14px] border p-3 text-left transition-all duration-150 active:scale-[0.995] ${isSelected
                       ? "border-zinc-300/40 bg-neutral-900/80 shadow-[0_12px_28px_rgba(255,255,255,0.08)]"
                       : "border-white/10 bg-neutral-950/40 hover:border-zinc-300/35 hover:bg-neutral-950/72"
-                  }`}
+                    }`}
                   onClick={() => void openDocument(document.documentId)}
                 >
                   <div className="flex items-start justify-between gap-3">
@@ -1506,6 +1508,380 @@ function JobsView({ jobs, events }: { jobs: JobRecord[]; events: PipelineEvent[]
           </ScrollArea>
         </CardContent>
       </Card>
+    </div>
+  );
+}
+
+type ConversationHookCodeTab = "python" | "nodejs" | "curl";
+
+const PYTHON_SNIPPET = `import requests
+
+MEMORY_API = "http://localhost:3000/api/v1/integration"
+API_KEY = "your-api-key"  # omit header if auth disabled
+
+def push_message(session_id: str, actor: str, text: str):
+    resp = requests.post(
+        f"{MEMORY_API}/chat-logs",
+        json={"sessionId": session_id, "actor": actor, "rawText": text},
+        headers={"Authorization": f"Bearer {API_KEY}"},
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+def push_conversation(session_id: str, messages: list[dict]):
+    logs = [{"actor": m["role"], "rawText": m["content"]} for m in messages]
+    resp = requests.post(
+        f"{MEMORY_API}/chat-logs/batch",
+        json={"sessionId": session_id, "logs": logs},
+        headers={"Authorization": f"Bearer {API_KEY}"},
+    )
+    resp.raise_for_status()
+    return resp.json()`;
+
+const NODEJS_SNIPPET = `const MEMORY_API = 'http://localhost:3000/api/v1/integration';
+const API_KEY = 'your-api-key'; // omit if auth disabled
+
+async function pushMessage(sessionId, actor, rawText) {
+  const res = await fetch(\`\${MEMORY_API}/chat-logs\`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': \`Bearer \${API_KEY}\`,
+    },
+    body: JSON.stringify({ sessionId, actor, rawText }),
+  });
+  if (!res.ok) throw new Error(\`HTTP \${res.status}\`);
+  return res.json();
+}
+
+async function pushConversation(sessionId, messages) {
+  const logs = messages.map(m => ({ actor: m.role, rawText: m.content }));
+  const res = await fetch(\`\${MEMORY_API}/chat-logs/batch\`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': \`Bearer \${API_KEY}\`,
+    },
+    body: JSON.stringify({ sessionId, logs }),
+  });
+  if (!res.ok) throw new Error(\`HTTP \${res.status}\`);
+  return res.json();
+}`;
+
+const CURL_SNIPPET = `# Single message
+curl -X POST http://localhost:3000/api/v1/integration/chat-logs \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer your-api-key" \\
+  -d '{
+    "sessionId": "session-abc123",
+    "actor": "user",
+    "rawText": "What is the capital of France?",
+    "sourceApp": "my-chatbot"
+  }'
+
+# Batch messages
+curl -X POST http://localhost:3000/api/v1/integration/chat-logs/batch \\
+  -H "Content-Type: application/json" \\
+  -H "Authorization: Bearer your-api-key" \\
+  -d '{
+    "sessionId": "session-abc123",
+    "sourceApp": "my-chatbot",
+    "logs": [
+      {"actor": "user", "rawText": "What is the capital of France?"},
+      {"actor": "agent", "rawText": "The capital of France is Paris."}
+    ]
+  }'`;
+
+function CodeBlock({ code, language }: { code: string; language: string }) {
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = () => {
+    void navigator.clipboard.writeText(code).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    });
+  };
+
+  return (
+    <div className="relative rounded-[14px] border border-white/10 bg-gray-900">
+      <div className="flex items-center justify-between border-b border-white/10 px-4 py-2">
+        <span className="text-[11px] uppercase tracking-[0.22em] text-neutral-500">{language}</span>
+        <button
+          type="button"
+          className="inline-flex items-center gap-1.5 rounded-md border border-white/10 bg-white/[0.04] px-2.5 py-1 text-[11px] uppercase tracking-[0.18em] text-neutral-300 transition-colors hover:border-white/16 hover:bg-white/[0.08]"
+          onClick={handleCopy}
+        >
+          <Copy className="h-3 w-3" />
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+      <pre className="overflow-x-auto p-4 text-sm leading-relaxed text-gray-100">
+        <code>{code}</code>
+      </pre>
+    </div>
+  );
+}
+
+function ConversationHookView() {
+  const [activeTab, setActiveTab] = useState<ConversationHookCodeTab>("python");
+  const [testSessionId, setTestSessionId] = useState("test-session-001");
+  const [testActor, setTestActor] = useState("user");
+  const [testText, setTestText] = useState("Hello, this is a test message from the memory engine console.");
+  const [testResult, setTestResult] = useState<{ ok: true; interactionId: string } | { ok: false; message: string } | null>(null);
+  const [testPending, setTestPending] = useState(false);
+
+  const handleSendTest = async () => {
+    setTestPending(true);
+    setTestResult(null);
+    try {
+      const res = await fetch("/api/v1/integration/chat-logs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sessionId: testSessionId, actor: testActor, rawText: testText }),
+      });
+      const data = (await res.json()) as Record<string, unknown>;
+      if (!res.ok) {
+        const message = typeof data.error === "string" ? data.error : `HTTP ${res.status}`;
+        setTestResult({ ok: false, message });
+      } else {
+        setTestResult({ ok: true, interactionId: String(data.interactionId ?? data.id ?? "—") });
+      }
+    } catch (error) {
+      setTestResult({ ok: false, message: error instanceof Error ? error.message : "Network error" });
+    } finally {
+      setTestPending(false);
+    }
+  };
+
+  const codeTabItems: { key: ConversationHookCodeTab; label: string }[] = [
+    { key: "python", label: "Python" },
+    { key: "nodejs", label: "Node.js" },
+    { key: "curl", label: "curl" },
+  ];
+
+  const codeByTab: Record<ConversationHookCodeTab, { code: string; language: string }> = {
+    python: { code: PYTHON_SNIPPET, language: "python" },
+    nodejs: { code: NODEJS_SNIPPET, language: "javascript" },
+    curl: { code: CURL_SNIPPET, language: "bash" },
+  };
+
+  return (
+    <div className="space-y-8">
+
+      {/* Section 1: How it works */}
+      <div>
+        <p className="mb-4 text-xs uppercase tracking-[0.28em] text-neutral-500">How it works</p>
+        <div className="grid gap-4 md:grid-cols-3">
+          {[
+            {
+              step: "1",
+              title: "Chat logs come in",
+              body: "Your LLM app posts individual messages or full conversation batches to the integration API. Each message is stamped with a session ID and actor role.",
+            },
+            {
+              step: "2",
+              title: "Stored as STM episodes",
+              body: "Each log entry is written into the Short-Term Memory base as an episodic interaction row, preserving the raw text, actor, session context, and optional metadata.",
+            },
+            {
+              step: "3",
+              title: "Consolidated during sleep cycle",
+              body: "When you trigger the sleep-cycle, STM episodes are projected into the MTM graph, clustered into communities, and distilled into the LTM semantic fact store.",
+            },
+          ].map((card) => (
+            <div key={card.step} className="rounded-[16px] border border-white/10 bg-white/[0.04] p-5">
+              <div className="mb-3 flex h-7 w-7 items-center justify-center rounded-full border border-white/10 bg-white/[0.06] text-xs font-semibold text-neutral-300">
+                {card.step}
+              </div>
+              <p className="font-medium text-white">{card.title}</p>
+              <p className="mt-2 text-sm leading-relaxed text-neutral-400">{card.body}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+
+      {/* Section 2: Authentication */}
+      <div>
+        <p className="mb-4 text-xs uppercase tracking-[0.28em] text-neutral-500">Authentication</p>
+        <div className="rounded-[16px] border border-white/10 bg-white/[0.04] p-5 space-y-4">
+          <p className="text-sm leading-relaxed text-neutral-300">
+            Set the <code className="rounded-md border border-white/10 bg-white/[0.06] px-1.5 py-0.5 font-mono text-xs text-neutral-100">INTEGRATION_API_KEYS</code> environment variable on the server to one or more comma-separated keys. When the variable is present, every request to the integration endpoints must supply a matching key.
+          </p>
+          <div className="rounded-[14px] border border-white/10 bg-gray-900 px-4 py-3">
+            <p className="font-mono text-sm text-gray-100">Authorization: Bearer &lt;your-api-key&gt;</p>
+          </div>
+          <div className="rounded-[14px] border border-zinc-300/20 bg-zinc-300/[0.06] px-4 py-3">
+            <p className="text-sm text-neutral-300">
+              <span className="font-medium text-white">Dev mode:</span> if <code className="rounded-md border border-white/10 bg-white/[0.06] px-1.5 py-0.5 font-mono text-xs text-neutral-100">INTEGRATION_API_KEYS</code> is not set, the endpoint accepts unauthenticated requests. The live test panel below uses this behaviour.
+            </p>
+          </div>
+        </div>
+      </div>
+
+      {/* Section 3: Endpoint Reference */}
+      <div>
+        <p className="mb-4 text-xs uppercase tracking-[0.28em] text-neutral-500">Endpoint Reference</p>
+        <div className="grid gap-4 xl:grid-cols-2">
+          {/* Single message */}
+          <div className="rounded-[16px] border border-white/10 bg-white/[0.04] p-5 space-y-4">
+            <div>
+              <div className="flex flex-wrap items-center gap-3">
+                <Badge className="bg-white/10 text-neutral-100">POST</Badge>
+                <code className="font-mono text-sm text-neutral-200">
+                  /api/v1/integration/chat-logs
+                </code>
+              </div>
+              <p className="mt-2 text-sm text-neutral-400">Submit a single interaction to the STM base.</p>
+            </div>
+            <div className="rounded-[14px] border border-white/10 bg-gray-900 p-4">
+              <pre className="overflow-x-auto text-xs leading-relaxed text-gray-100">{`{
+  "sessionId":             "string (required)",
+  "actor":                 "user | agent | system",
+  "rawText":               "string (required, max 5120 chars)",
+  "externalMessageId":     "string (optional)",
+  "externalTimestamp":     "ISO 8601 string (optional)",
+  "sourceApp":             "string (optional)",
+  "agentId":               "string (optional)",
+  "namespace":             "string (optional)",
+  "externalConversationId":"string (optional)",
+  "metadata":              "object (optional)"
+}`}</pre>
+            </div>
+          </div>
+
+          {/* Batch messages */}
+          <div className="rounded-[16px] border border-white/10 bg-white/[0.04] p-5 space-y-4">
+            <div>
+              <div className="flex flex-wrap items-center gap-3">
+                <Badge className="bg-white/10 text-neutral-100">POST</Badge>
+                <code className="font-mono text-sm text-neutral-200">
+                  /api/v1/integration/chat-logs/batch
+                </code>
+              </div>
+              <p className="mt-2 text-sm text-neutral-400">Submit 1–200 log entries in a single request.</p>
+            </div>
+            <div className="rounded-[14px] border border-white/10 bg-gray-900 p-4">
+              <pre className="overflow-x-auto text-xs leading-relaxed text-gray-100">{`{
+  "sessionId":  "string (required)",
+  "sourceApp":  "string (optional)",
+  "logs": [
+    {
+      "actor":              "user | agent | system",
+      "rawText":            "string (required)",
+      "externalMessageId":  "string (optional)",
+      "externalTimestamp":  "ISO 8601 string (optional)"
+    }
+  ]
+}`}</pre>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Section 4: Integration Examples */}
+      <div>
+        <p className="mb-4 text-xs uppercase tracking-[0.28em] text-neutral-500">Integration Examples</p>
+        <div className="rounded-[16px] border border-white/10 bg-white/[0.04] overflow-hidden">
+          {/* Tab bar */}
+          <div className="flex border-b border-white/10">
+            {codeTabItems.map((tab) => (
+              <button
+                key={tab.key}
+                type="button"
+                className={`px-5 py-3 text-sm transition-colors ${activeTab === tab.key
+                    ? "border-b-2 border-zinc-300 text-white"
+                    : "text-neutral-400 hover:text-neutral-200"
+                  }`}
+                onClick={() => setActiveTab(tab.key)}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+          <div className="p-5">
+            <CodeBlock code={codeByTab[activeTab].code} language={codeByTab[activeTab].language} />
+          </div>
+        </div>
+      </div>
+
+      {/* Section 5: Verify your setup */}
+      <div>
+        <p className="mb-4 text-xs uppercase tracking-[0.28em] text-neutral-500">Verify Your Setup</p>
+        <div className="rounded-[16px] border border-white/10 bg-white/[0.04] p-5 space-y-4">
+          <p className="text-sm text-neutral-400">
+            Send a test message directly from this console. The request goes to the local server with no <code className="rounded-md border border-white/10 bg-white/[0.06] px-1.5 py-0.5 font-mono text-xs text-neutral-100">Authorization</code> header, so it works whenever the server is running in dev mode.
+          </p>
+          <div className="grid gap-4 sm:grid-cols-[1fr_auto]">
+            <div className="space-y-3">
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div>
+                  <p className="mb-1.5 text-xs uppercase tracking-[0.22em] text-neutral-500">Session ID</p>
+                  <Input
+                    value={testSessionId}
+                    onChange={(e) => setTestSessionId(e.target.value)}
+                    placeholder="test-session-001"
+                    className="border-white/10 bg-neutral-900/50 text-neutral-100"
+                  />
+                </div>
+                <div>
+                  <p className="mb-1.5 text-xs uppercase tracking-[0.22em] text-neutral-500">Actor</p>
+                  <select
+                    value={testActor}
+                    onChange={(e) => setTestActor(e.target.value)}
+                    className="h-10 w-full rounded-md border border-white/10 bg-neutral-900/50 px-3 text-sm text-neutral-100 focus:outline-none focus:ring-1 focus:ring-zinc-300/40"
+                  >
+                    <option value="user">user</option>
+                    <option value="agent">agent</option>
+                    <option value="system">system</option>
+                  </select>
+                </div>
+              </div>
+              <div>
+                <p className="mb-1.5 text-xs uppercase tracking-[0.22em] text-neutral-500">Message Text</p>
+                <textarea
+                  value={testText}
+                  onChange={(e) => setTestText(e.target.value)}
+                  rows={3}
+                  className="w-full rounded-md border border-white/10 bg-neutral-900/50 px-3 py-2 text-sm text-neutral-100 placeholder-neutral-500 focus:outline-none focus:ring-1 focus:ring-zinc-300/40 resize-none"
+                  placeholder="Enter a test message..."
+                />
+              </div>
+            </div>
+          </div>
+          <div className="flex flex-wrap items-center gap-4">
+            <Button
+              className="bg-zinc-300 text-neutral-950 hover:bg-zinc-200"
+              disabled={testPending || !testSessionId.trim() || !testText.trim()}
+              onClick={() => void handleSendTest()}
+            >
+              {testPending ? (
+                <>
+                  <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />
+                  Sending...
+                </>
+              ) : (
+                <>
+                  <MessageSquare className="mr-2 h-4 w-4" />
+                  Send Test Message
+                </>
+              )}
+            </Button>
+            {testResult ? (
+              testResult.ok ? (
+                <div className="flex items-center gap-2 rounded-full border border-emerald-300/30 bg-emerald-300/10 px-4 py-2 text-sm text-emerald-200">
+                  <CheckCircle2 className="h-4 w-4 text-emerald-300" />
+                  <span>Stored — interaction ID: <code className="font-mono text-xs">{testResult.interactionId}</code></span>
+                </div>
+              ) : (
+                <div className="flex items-center gap-2 rounded-full border border-rose-300/30 bg-rose-300/10 px-4 py-2 text-sm text-rose-200">
+                  <AlertTriangle className="h-4 w-4 text-rose-300" />
+                  {testResult.message}
+                </div>
+              )
+            ) : null}
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
