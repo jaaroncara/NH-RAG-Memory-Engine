@@ -56,7 +56,7 @@ export interface GraphSnapshot {
   };
 }
 
-const SIMILARITY_THRESHOLD = 0.85;
+const SIMILARITY_THRESHOLD = 0.72;
 const MTM_GRAPH_NODE_LABELS = ["EpisodicNode"];
 const MTM_GRAPH_RELATIONSHIP_PROJECTION = {
   SIMILAR_TO: { orientation: "UNDIRECTED", properties: ["combinedWeight"] },
@@ -121,7 +121,7 @@ export async function consolidateToMTM(
        RETURN existing.nodeId AS id,
               existing.embedding AS emb,
               coalesce(existing.semanticPayloadJson, '[]') AS semanticPayloadJson`
-    , { nodeId: interactionId });
+      , { nodeId: interactionId });
 
     for (const record of result.records) {
       const otherId = record.get("id");
@@ -386,20 +386,20 @@ export async function getGraphSnapshot(limit?: number): Promise<GraphSnapshot> {
     const stats =
       normalizedLimit === undefined
         ? {
-            nodeCount: nodes.length,
-            edgeCount: edges.length,
-            communityCount: new Set(
-              episodicNodes
-                .map((node) => node.communityId)
-                .filter((value) => value !== undefined && value !== -1)
-            ).size,
-            episodicNodeCount: episodicNodes.length,
-            annotatedNodeCount: episodicNodes.filter(
-              (node) => node.semanticEntityCount > 0
-            ).length,
-            similarityEdgeCount: edges.length,
-            overlapEdgeCount: edges.filter((edge) => edge.sharedEntityCount > 0).length,
-          }
+          nodeCount: nodes.length,
+          edgeCount: edges.length,
+          communityCount: new Set(
+            episodicNodes
+              .map((node) => node.communityId)
+              .filter((value) => value !== undefined && value !== -1)
+          ).size,
+          episodicNodeCount: episodicNodes.length,
+          annotatedNodeCount: episodicNodes.filter(
+            (node) => node.semanticEntityCount > 0
+          ).length,
+          similarityEdgeCount: edges.length,
+          overlapEdgeCount: edges.filter((edge) => edge.sharedEntityCount > 0).length,
+        }
         : await getGraphStats();
 
     return {

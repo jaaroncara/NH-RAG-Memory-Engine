@@ -122,28 +122,65 @@ export function buildSemanticEdgeProperties(
   const normalizedTarget = normalizeStoredSemanticEntities(targetEntities);
   const sourceById = new Map(normalizedSource.map((entity) => [entity.entityId, entity]));
   const targetById = new Map(normalizedTarget.map((entity) => [entity.entityId, entity]));
-  const sourceKeys = new Set(sourceById.keys());
-  const targetKeys = new Set(targetById.keys());
-  const sharedKeys = Array.from(sourceKeys).filter((entityId) => targetKeys.has(entityId)).sort();
-  const unionKeys = new Set([...sourceKeys, ...targetKeys]);
+  const sourceExpanded = buildAliasExpandedKeys(normalizedSource);
+  const targetExpanded = buildAliasExpandedKeys(normalizedTarget);
+  const sharedSourceIds = new Set<string>();
+  for (const [aliasKey, sourceCanonicalId] of sourceExpanded) {
+    if (targetExpanded.has(aliasKey)) {
+      sharedSourceIds.add(sourceCanonicalId);
+    }
+  }
+  const sharedKeys = Array.from(sharedSourceIds).sort();
+  const unionKeys = new Set([...sourceById.keys(), ...targetById.keys()]);
   const semanticOverlapWeight = unionKeys.size === 0 ? 0 : sharedKeys.length / unionKeys.size;
   const combinedWeight =
     cosineWeight * COSINE_WEIGHT_RATIO + semanticOverlapWeight * SEMANTIC_WEIGHT_RATIO;
-  const sharedEntities = sharedKeys.map((entityId) => {
-    const left = sourceById.get(entityId)!;
-    const right = targetById.get(entityId)!;
+  const sharedEntities = sharedKeys.map((sourceId) => {
+    const left = sourceById.get(sourceId)!;
 
+    // Exact match: source canonical key exists directly in target
+    if (targetById.has(sourceId)) {
+      const right = targetById.get(sourceId)!;
+      return {
+        entityId: sourceId,
+        entityType: left.entityType,
+        canonicalName:
+          left.canonicalName.length >= right.canonicalName.length
+            ? left.canonicalName
+            : right.canonicalName,
+        confidence: Math.max(left.confidence, right.confidence),
+        relationshipTypes: uniqueValues([left.relationshipType, right.relationshipType]),
+        relationshipHints: uniqueValues(
+          [left.relationshipHint, right.relationshipHint].filter(
+            (value): value is string => Boolean(value)
+          )
+        ),
+      } satisfies SharedSemanticEntity;
+    }
+
+    // Alias-only match: find the target entity via alias key resolution
+    let right: StoredSemanticEntity | undefined;
+    for (const [aliasKey, canonicalId] of sourceExpanded) {
+      if (canonicalId === sourceId && targetExpanded.has(aliasKey)) {
+        right = targetById.get(targetExpanded.get(aliasKey)!);
+        if (right) break;
+      }
+    }
+
+    const effectiveRight = right ?? left;
     return {
-      entityId,
+      entityId: sourceId,
       entityType: left.entityType,
       canonicalName:
-        left.canonicalName.length >= right.canonicalName.length
+        left.canonicalName.length >= effectiveRight.canonicalName.length
           ? left.canonicalName
-          : right.canonicalName,
-      confidence: Math.max(left.confidence, right.confidence),
-      relationshipTypes: uniqueValues([left.relationshipType, right.relationshipType]),
+          : effectiveRight.canonicalName,
+      confidence: Math.max(left.confidence, effectiveRight.confidence),
+      relationshipTypes: right
+        ? uniqueValues([left.relationshipType, right.relationshipType])
+        : [left.relationshipType],
       relationshipHints: uniqueValues(
-        [left.relationshipHint, right.relationshipHint].filter(
+        [left.relationshipHint, right?.relationshipHint ?? null].filter(
           (value): value is string => Boolean(value)
         )
       ),
@@ -277,10 +314,10 @@ function asOptionalString(value: unknown) {
 function asStringArray(value: unknown) {
   return Array.isArray(value)
     ? uniqueValues(
-        value
-          .map((entry) => asString(entry))
-          .filter((entry) => entry.length > 0)
-      )
+      value
+        .map((entry) => asString(entry))
+        .filter((entry) => entry.length > 0)
+    )
     : [];
 }
 
@@ -317,13 +354,36 @@ function asSemanticRelationshipType(value: unknown): SemanticRelationshipType | 
 function asSemanticRelationshipArray(value: unknown) {
   return Array.isArray(value)
     ? uniqueValues(
-        value
-          .map((entry) => asSemanticRelationshipType(entry))
-          .filter((entry): entry is SemanticRelationshipType => entry !== null)
-      )
+      value
+        .map((entry) => asSemanticRelationshipType(entry))
+        .filter((entry): entry is SemanticRelationshipType => entry !== null)
+    )
     : [];
 }
 
 function uniqueValues<T>(values: T[]) {
   return Array.from(new Set(values));
+}
+
+function buildAliasExpandedKeys(entities: StoredSemanticEntity[]): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const entity of entities) {
+    map.set(entity.entityId, entity.entityId);
+    for (const alias of entity.aliases) {
+      map.set(`${entity.entityType}:${buildCanonicalKey(alias)}`, entity.entityId);
+    }
+  }
+  return map;
+}
+
+function normalizeDisplayText(value: string): string {
+  return value.normalize("NFKC").replace(/\s+/g, " ").trim();
+}
+
+function buildCanonicalKey(value: string): string {
+  return normalizeDisplayText(value)
+    .toLowerCase()
+    .replace(/["'`]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
 }

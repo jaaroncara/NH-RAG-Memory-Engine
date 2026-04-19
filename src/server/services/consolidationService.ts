@@ -3,9 +3,10 @@ import { getProvider } from "../providers/index.js";
 import { storeFact } from "./ltmService.js";
 import { createJob, markJobCompleted, markJobFailed, markJobRunning, recordPipelineEvent } from "./jobService.js";
 import { parseStoredSemanticEntities, type StoredSemanticEntity } from "./semanticGraphAttributes.js";
+import { CONCEPT_HIERARCHY } from "../ontology/conceptHierarchy.js";
 
 const SALIENCE_PERCENTILE = 25;
-const MIN_COMMUNITY_SIZE = 3;
+const MIN_COMMUNITY_SIZE = 2;
 const SLEEP_CYCLE_NODE_LABELS = ["EpisodicNode"];
 const SLEEP_CYCLE_RELATIONSHIP_PROJECTION = {
   SIMILAR_TO: { orientation: "UNDIRECTED", properties: ["combinedWeight"] },
@@ -29,6 +30,13 @@ interface SemanticCommunityRelation {
   canonicalName: string;
   confidence: number;
   relationshipHint?: string | null;
+}
+
+interface CommunityRecord {
+  cid: unknown;
+  nodeIds: string[];
+  contents: string[];
+  entityKeys: string[];
 }
 
 export interface SleepCycleLaunchResult {
@@ -182,26 +190,53 @@ async function processSleepCycleJob(jobId: string): Promise<void> {
     });
 
     // ------------------------------------------------------------------
-    // 3. Louvain Community Detection
+    // 3. Community Detection (Leiden with Louvain fallback)
     // ------------------------------------------------------------------
-    await session.run(
-      `CALL gds.louvain.write($graphName, {
-        relationshipWeightProperty: 'combinedWeight',
-        writeProperty: 'communityId'
-      })`,
-      { graphName }
-    );
+    try {
+      await session.run(
+        `CALL gds.leiden.write($graphName, {
+          relationshipWeightProperty: 'combinedWeight',
+          writeProperty: 'communityId',
+          gamma: 1.0,
+          theta: 0.01
+        })`,
+        { graphName }
+      );
+    } catch (error) {
+      console.warn("gds.leiden not available, falling back to gds.louvain:", error);
+      await session.run(
+        `CALL gds.louvain.write($graphName, {
+          relationshipWeightProperty: 'combinedWeight',
+          writeProperty: 'communityId',
+          tolerance: 0.0001,
+          maxIterations: 20
+        })`,
+        { graphName }
+      );
+    }
     await markJobRunning(jobId, "cluster_communities", SLEEP_CYCLE_PROGRESS.clusterCommunities);
 
-    // Read communities (excluding pruned nodes)
+    // Read communities (excluding pruned nodes), including flattened entity keys
     const commResult = await session.run(
       `MATCH (n:EpisodicNode)
        WHERE n.communityId IS NOT NULL AND NOT n.nodeId IN $pruned
-       RETURN n.communityId AS cid, collect(n.nodeId) AS nodeIds, collect(n.content) AS contents`,
+       RETURN n.communityId AS cid,
+              collect(n.nodeId) AS nodeIds,
+              collect(n.content) AS contents,
+              reduce(acc = [], keys IN collect(coalesce(n.semanticEntityKeys, [])) | acc + keys) AS allEntityKeys`,
       { pruned: nodesToPrune }
     );
-    const eligibleCommunities = commResult.records.filter(
-      (record) => ((record.get("nodeIds") as string[]) ?? []).length >= MIN_COMMUNITY_SIZE
+
+    // Parse raw records, merge bridged communities, then filter by minimum size
+    const communityRecords: CommunityRecord[] = commResult.records.map((record) => ({
+      cid: record.get("cid"),
+      nodeIds: record.get("nodeIds") as string[],
+      contents: record.get("contents") as string[],
+      entityKeys: record.get("allEntityKeys") as string[],
+    }));
+    const mergedCommunityRecords = mergeBridgedCommunities(communityRecords);
+    const eligibleCommunities = mergedCommunityRecords.filter(
+      (record) => record.nodeIds.length >= MIN_COMMUNITY_SIZE
     );
     await recordPipelineEvent({
       jobId,
@@ -239,15 +274,15 @@ async function processSleepCycleJob(jobId: string): Promise<void> {
     let processedCommunities = 0;
     let lastDistillEventPercent = -1;
     for (const record of eligibleCommunities) {
-      const communityId = record.get("cid");
-      const nodeIds = record.get("nodeIds") as string[];
-      const contents = record.get("contents") as string[];
+      const communityId = record.cid;
+      const nodeIds = record.nodeIds;
+      const contents = record.contents;
 
       const semanticContextResult = await session.run(
         `MATCH (e:EpisodicNode)
-         WHERE e.communityId = $communityId AND NOT e.nodeId IN $pruned
+         WHERE e.nodeId IN $nodeIds AND NOT e.nodeId IN $pruned
          RETURN collect(coalesce(e.semanticPayloadJson, '[]')) AS semanticPayloads`,
-        { communityId, pruned: nodesToPrune }
+        { nodeIds, pruned: nodesToPrune }
       );
       const semanticContext = semanticContextResult.records[0];
       const semanticPayloads =
@@ -258,8 +293,9 @@ async function processSleepCycleJob(jobId: string): Promise<void> {
         semanticPayloads.flat()
       );
 
+      const conceptAnchors = buildConceptAnchors(semanticEntities);
       const distilledFact = await provider.generate(
-        buildDistillationPrompt(contents, semanticEntities, semanticRelations)
+        buildDistillationPrompt(contents, semanticEntities, semanticRelations, conceptAnchors)
       );
 
       if (distilledFact) {
@@ -388,10 +424,34 @@ function interpolateProgress(start: number, end: number, completedUnits: number,
   return Math.round(start + (end - start) * ratio);
 }
 
+function buildConceptAnchors(semanticEntities: SemanticCommunityEntity[]): string {
+  const conceptCounts = new Map<string, number>();
+
+  for (const entity of semanticEntities) {
+    const canonicalKey = entity.entityId.split(":")[1];
+    const mapping = CONCEPT_HIERARCHY[canonicalKey];
+    if (!mapping) continue;
+
+    const concept = mapping.parent;
+    conceptCounts.set(concept, (conceptCounts.get(concept) ?? 0) + entity.mentionCount);
+  }
+
+  if (conceptCounts.size === 0) {
+    return "- none";
+  }
+
+  return Array.from(conceptCounts.entries())
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([concept, count]) => `- ${concept} (mentions: ${count})`)
+    .join("\n");
+}
+
 function buildDistillationPrompt(
   contents: string[],
   semanticEntities: SemanticCommunityEntity[],
-  semanticRelations: SemanticCommunityRelation[]
+  semanticRelations: SemanticCommunityRelation[],
+  conceptAnchors: string
 ) {
   const episodicSection = contents.join("\n");
   const semanticEntitySection = formatSemanticEntities(semanticEntities);
@@ -408,6 +468,9 @@ function buildDistillationPrompt(
     "",
     "Semantic anchors:",
     semanticEntitySection,
+    "",
+    "Concept domains:",
+    conceptAnchors,
     "",
     "Entity relations:",
     semanticRelationSection,
@@ -431,8 +494,7 @@ function formatSemanticEntities(semanticEntities: SemanticCommunityEntity[]) {
     .slice(0, 16)
     .map(
       (entity) =>
-        `- [${entity.entityType}] ${entity.canonicalName}${
-          entity.mentionCount > 0 ? ` (mentions: ${entity.mentionCount})` : ""
+        `- [${entity.entityType}] ${entity.canonicalName}${entity.mentionCount > 0 ? ` (mentions: ${entity.mentionCount})` : ""
         }`
     )
     .join("\n");
@@ -455,8 +517,7 @@ function formatSemanticRelations(semanticRelations: SemanticCommunityRelation[])
     .slice(0, 24)
     .map(
       (relation) =>
-        `- ${relation.relationshipType} -> ${relation.canonicalName} [${relation.entityType}]${
-          relation.relationshipHint ? ` | ${relation.relationshipHint}` : ""
+        `- ${relation.relationshipType} -> ${relation.canonicalName} [${relation.entityType}]${relation.relationshipHint ? ` | ${relation.relationshipHint}` : ""
         }`
     )
     .join("\n");
@@ -520,4 +581,64 @@ function buildCommunitySemanticContext(entities: StoredSemanticEntity[]) {
     semanticEntities: Array.from(mergedEntities.values()),
     semanticRelations: Array.from(mergedRelations.values()),
   };
+}
+
+function mergeBridgedCommunities(
+  records: CommunityRecord[],
+  minSharedKeys: number = 3
+): CommunityRecord[] {
+  const n = records.length;
+
+  // Union-Find with path compression
+  const parent = Array.from({ length: n }, (_, i) => i);
+
+  function find(x: number): number {
+    if (parent[x] !== x) {
+      parent[x] = find(parent[x]);
+    }
+    return parent[x];
+  }
+
+  function union(x: number, y: number): void {
+    parent[find(x)] = find(y);
+  }
+
+  // Pre-build Sets for O(1) membership checks during pair comparisons
+  const keySets = records.map((r) => new Set(r.entityKeys));
+
+  // Check all pairs; union those with >= minSharedKeys overlap
+  for (let i = 0; i < n; i++) {
+    for (let j = i + 1; j < n; j++) {
+      let sharedCount = 0;
+      for (const key of keySets[i]) {
+        if (keySets[j].has(key)) {
+          sharedCount++;
+          if (sharedCount >= minSharedKeys) break;
+        }
+      }
+      if (sharedCount >= minSharedKeys) {
+        union(i, j);
+      }
+    }
+  }
+
+  // Group records by their root representative
+  const groups = new Map<number, CommunityRecord[]>();
+  for (let i = 0; i < n; i++) {
+    const root = find(i);
+    const group = groups.get(root) ?? [];
+    group.push(records[i]);
+    groups.set(root, group);
+  }
+
+  // Merge each group into a single CommunityRecord; singletons pass through unchanged
+  return Array.from(groups.values()).map((group) => {
+    if (group.length === 1) return group[0];
+    return {
+      cid: group[0].cid,
+      nodeIds: group.flatMap((r) => r.nodeIds),
+      contents: group.flatMap((r) => r.contents),
+      entityKeys: Array.from(new Set(group.flatMap((r) => r.entityKeys))),
+    };
+  });
 }
