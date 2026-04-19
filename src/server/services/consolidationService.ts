@@ -1,6 +1,7 @@
 import { getNeo4jDriver } from "../db/neo4j.js";
 import { getProvider } from "../providers/index.js";
-import { storeFact } from "./ltmService.js";
+import { storeFact, condenseLtmFacts } from "./ltmService.js";
+import { pruneStm } from "./stmService.js";
 import { createJob, markJobCompleted, markJobFailed, markJobRunning, recordPipelineEvent } from "./jobService.js";
 import { parseStoredSemanticEntities, type StoredSemanticEntity } from "./semanticGraphAttributes.js";
 import { CONCEPT_HIERARCHY } from "../ontology/conceptHierarchy.js";
@@ -54,6 +55,8 @@ const SLEEP_CYCLE_PROGRESS = {
   distillStart: 62,
   distillComplete: 92,
   cleanup: 97,
+  stmPrune: 98,
+  ltmCondense: 99,
   completed: 100,
 } as const;
 
@@ -384,6 +387,63 @@ async function processSleepCycleJob(jobId: string): Promise<void> {
     // ------------------------------------------------------------------
     await session.run(`CALL gds.graph.drop($graphName)`, { graphName });
 
+    // ------------------------------------------------------------------
+    // 7. STM Pruning — remove aged-out conversation entries and enforce per-session row caps
+    // ------------------------------------------------------------------
+    let stmStats = { deletedByAge: 0, deletedByCount: 0 };
+    try {
+      await markJobRunning(jobId, "stm_prune", SLEEP_CYCLE_PROGRESS.stmPrune);
+      stmStats = await pruneStm({ maxAgeHours: 72, maxRowsPerSession: 200 });
+      await recordPipelineEvent({
+        jobId,
+        stage: "stm_prune",
+        message: `STM pruned: ${stmStats.deletedByAge} entries removed by age, ${stmStats.deletedByCount} removed by session count cap`,
+        payload: {
+          progress: SLEEP_CYCLE_PROGRESS.stmPrune,
+          ...stmStats,
+        },
+      });
+    } catch (stmError) {
+      console.error("[consolidationService] STM prune failed:", stmError);
+      await recordPipelineEvent({
+        jobId,
+        stage: "stm_prune",
+        level: "error",
+        message: "STM pruning failed — sleep cycle will still complete",
+        payload: { error: stmError instanceof Error ? stmError.message : String(stmError) },
+      });
+    }
+
+    // ------------------------------------------------------------------
+    // 8. LTM Condensation — merge similar dormant facts into coarser summaries
+    // ------------------------------------------------------------------
+    let ltmStats = { clustersFound: 0, factsCondensed: 0, newFactsCreated: 0 };
+    try {
+      await markJobRunning(jobId, "ltm_condense", SLEEP_CYCLE_PROGRESS.ltmCondense);
+      ltmStats = await condenseLtmFacts({ dormancyDays: 60, similarityThreshold: 0.88 });
+      await recordPipelineEvent({
+        jobId,
+        stage: "ltm_condense",
+        message:
+          ltmStats.clustersFound > 0
+            ? `LTM condensation: ${ltmStats.factsCondensed} dormant facts merged into ${ltmStats.newFactsCreated} coarser summaries across ${ltmStats.clustersFound} clusters`
+            : "LTM condensation: no dormant fact clusters found",
+        payload: {
+          progress: SLEEP_CYCLE_PROGRESS.ltmCondense,
+          ...ltmStats,
+        },
+      });
+    } catch (ltmError) {
+      console.error("[consolidationService] LTM condensation failed:", ltmError);
+      await recordPipelineEvent({
+        jobId,
+        stage: "ltm_condense",
+        level: "error",
+        message: "LTM condensation failed — sleep cycle will still complete",
+        payload: { error: ltmError instanceof Error ? ltmError.message : String(ltmError) },
+      });
+    }
+
     await recordPipelineEvent({
       jobId,
       stage: "cleanup",
@@ -392,6 +452,10 @@ async function processSleepCycleJob(jobId: string): Promise<void> {
         progress: SLEEP_CYCLE_PROGRESS.completed,
         pruned: nodesToPrune.length,
         consolidated: consolidatedCount,
+        stmDeletedByAge: stmStats.deletedByAge,
+        stmDeletedByCount: stmStats.deletedByCount,
+        ltmClustersCondensed: ltmStats.clustersFound,
+        ltmFactsCondensed: ltmStats.factsCondensed,
       },
     });
     await markJobCompleted(jobId, "completed", 100, {

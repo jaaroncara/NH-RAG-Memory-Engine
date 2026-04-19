@@ -179,3 +179,55 @@ export async function getStmCount(): Promise<number> {
     .from(shortTermMemory);
   return row.count;
 }
+
+export interface StmPruneResult {
+  deletedByAge: number;
+  deletedByCount: number;
+}
+
+/**
+ * Delete conversation entries older than maxAgeHours.
+ * Document chunks (source_type = 'docling_import') are excluded because they
+ * may not yet have been consolidated into the MTM by the sleep cycle.
+ */
+async function pruneStmByAge(maxAgeHours: number): Promise<number> {
+  const result = await db.execute(sql`
+    DELETE FROM short_term_memory
+    WHERE "timestamp" < NOW() - (${maxAgeHours} * INTERVAL '1 hour')
+      AND source_type = 'conversation'
+    RETURNING interaction_id
+  `);
+  return (result.rows as unknown[]).length;
+}
+
+/**
+ * For every session that exceeds maxRowsPerSession, delete the oldest rows
+ * beyond the cap. Applies to all source types including document chunks.
+ */
+async function pruneStmBySessionCount(maxRowsPerSession: number): Promise<number> {
+  const result = await db.execute(sql`
+    DELETE FROM short_term_memory
+    WHERE interaction_id IN (
+      SELECT interaction_id FROM (
+        SELECT interaction_id,
+               ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY "timestamp" DESC) AS rn
+        FROM short_term_memory
+      ) ranked
+      WHERE rn > ${maxRowsPerSession}
+    )
+    RETURNING interaction_id
+  `);
+  return (result.rows as unknown[]).length;
+}
+
+/**
+ * Run both STM pruning strategies in sequence (age first, then count cap).
+ */
+export async function pruneStm(opts?: {
+  maxAgeHours?: number;
+  maxRowsPerSession?: number;
+}): Promise<StmPruneResult> {
+  const deletedByAge = await pruneStmByAge(opts?.maxAgeHours ?? 72);
+  const deletedByCount = await pruneStmBySessionCount(opts?.maxRowsPerSession ?? 200);
+  return { deletedByAge, deletedByCount };
+}

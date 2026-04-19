@@ -107,6 +107,8 @@ export const longTermMemory = pgTable("long_term_memory", {
   distilledFact: text("distilled_fact").notNull(),
   embedding: vector("embedding").notNull(),
   lastAccessed: timestamp("last_accessed", { withTimezone: true }).notNull().defaultNow(),
+  accessCount: integer("access_count").notNull().default(0),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
   provenance: text("provenance").array().default([]),
   metadata: jsonb("metadata").$type<Record<string, unknown>>().notNull().default({}),
 });
