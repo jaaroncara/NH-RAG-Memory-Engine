@@ -1,49 +1,18 @@
-import { type Session } from "neo4j-driver";
-
 import { getNeo4jDriver } from "../db/neo4j.js";
 import { getProvider } from "../providers/index.js";
 import { storeFact, condenseLtmFacts } from "./ltmService.js";
 import { pruneStm } from "./stmService.js";
 import { createJob, markJobCompleted, markJobFailed, markJobRunning, recordPipelineEvent } from "./jobService.js";
-import { parseStoredSemanticEntities, type StoredSemanticEntity } from "./semanticGraphAttributes.js";
 import { CONCEPT_HIERARCHY } from "../ontology/conceptHierarchy.js";
 import { getPruningConfig } from "../config/pruningConfig.js";
 
 const SALIENCE_PERCENTILE = 25;
 const MIN_COMMUNITY_SIZE = 2;
-const MENTIONS_COVERAGE_THRESHOLD = 0.15;
-const SLEEP_CYCLE_NODE_LABELS = ["EpisodicNode"];
-const SLEEP_CYCLE_RELATIONSHIP_PROJECTION = {
-  SIMILAR_TO: { orientation: "UNDIRECTED", properties: ["combinedWeight"] },
-};
-
-// Cypher projection relationship query for bipartite (topic-Jaccard) graph.
-// Part 1: chunk pairs connected via shared TopicNodes, weighted by Jaccard similarity.
-// Part 2: fallback SIMILAR_TO edges for chunks with no MENTIONS coverage.
-// id(c1) < id(c2) deduplicates pairs; GDS reads the returned `weight` column automatically.
-const BIPARTITE_RELATIONSHIP_QUERY = `
-MATCH (c1:EpisodicNode)-[:MENTIONS]->(t:TopicNode)<-[:MENTIONS]-(c2:EpisodicNode)
-WHERE id(c1) < id(c2)
-WITH c1, c2, count(DISTINCT t) AS intersection
-WHERE intersection > 0
-MATCH (c1)-[:MENTIONS]->(allT1:TopicNode)
-WITH c1, c2, intersection, count(DISTINCT allT1) AS c1Topics
-MATCH (c2)-[:MENTIONS]->(allT2:TopicNode)
-WITH c1, c2, intersection, c1Topics, count(DISTINCT allT2) AS c2Topics
-WHERE (c1Topics + c2Topics - intersection) > 0
-RETURN id(c1) AS source,
-       id(c2) AS target,
-       toFloat(intersection) / (c1Topics + c2Topics - intersection) AS weight
-
-UNION ALL
-
-MATCH (c1:EpisodicNode)-[r:SIMILAR_TO]-(c2:EpisodicNode)
-WHERE id(c1) < id(c2)
-  AND NOT (c1)-[:MENTIONS]->(:TopicNode)<-[:MENTIONS]-(c2)
-RETURN id(c1) AS source,
-       id(c2) AS target,
-       coalesce(r.combinedWeight, r.weight, 0.75) AS weight
-`;
+const MIN_NODES_FOR_PRUNING = 8;
+const MAX_PRUNE_FRACTION = 0.20;
+const MIN_SCORE_VARIANCE_RATIO = 0.05;
+const KNN_SIMILARITY_CUTOFF = 0.82;
+const KNN_TOP_K = 10;
 
 interface PageRankScore {
   graphNodeId: string;
@@ -69,7 +38,6 @@ interface CommunityRecord {
   cid: unknown;
   nodeIds: string[];
   contents: string[];
-  entityKeys: string[];
 }
 
 interface CommunityTopicRow {
@@ -84,23 +52,6 @@ interface TopicRelTypeRow {
   topRelTypes: Array<{ relationshipType: string; count: number }>;
 }
 
-async function checkMentionsCoverage(
-  session: Session
-): Promise<{ totalNodes: number; coverage: number }> {
-  const result = await session.run(
-    `MATCH (n:EpisodicNode)
-     WITH count(n) AS totalNodes
-     MATCH (n2:EpisodicNode)-[:MENTIONS]->(:TopicNode)
-     WITH totalNodes, count(DISTINCT n2) AS nodesWithMentions
-     RETURN totalNodes, toFloat(nodesWithMentions) / totalNodes AS coverage`
-  );
-  const record = result.records[0];
-  if (!record) return { totalNodes: 0, coverage: 0 };
-  const totalNodes = normalizeNeo4jNumber(record.get("totalNodes"));
-  const coverage = Number(record.get("coverage") ?? 0);
-  return { totalNodes, coverage };
-}
-
 export interface SleepCycleLaunchResult {
   jobId: string;
   status: "queued";
@@ -109,16 +60,19 @@ export interface SleepCycleLaunchResult {
 }
 
 const SLEEP_CYCLE_PROGRESS = {
-  projectGraphStart: 8,
-  rankNodesStart: 24,
-  rankNodesComplete: 42,
-  clusterCommunities: 55,
-  distillStart: 62,
-  distillComplete: 92,
-  cleanup: 97,
-  stmPrune: 98,
-  ltmCondense: 99,
-  completed: 100,
+  clearEdges:           5,
+  knnProject:           8,
+  knnWrite:            18,
+  analyticsProject:    22,
+  rankNodesStart:      24,
+  rankNodesComplete:   42,
+  clusterCommunities:  55,
+  distillStart:        62,
+  distillComplete:     92,
+  cleanup:             97,
+  stmPrune:            98,
+  ltmCondense:         99,
+  completed:          100,
 } as const;
 
 export async function runSleepCycle(): Promise<SleepCycleLaunchResult> {
@@ -143,21 +97,20 @@ export async function runSleepCycle(): Promise<SleepCycleLaunchResult> {
 async function processSleepCycleJob(jobId: string): Promise<void> {
   const driver = getNeo4jDriver();
   const session = driver.session();
+  const ts = Date.now();
+  const knnGraphName       = `nhrag_knn_${ts}`;
+  const analyticsGraphName = `nhrag_analytics_${ts}`;
+  const louvainGraphName   = `nhrag_louvain_${ts}`;
+  let knnGraphProjected       = false;
+  let analyticsGraphProjected = false;
+  let louvainGraphProjected   = false;
 
   try {
-    await markJobRunning(jobId, "project_graph", SLEEP_CYCLE_PROGRESS.projectGraphStart);
-    await recordPipelineEvent({
-      jobId,
-      stage: "project_graph",
-      message: "Sleep cycle started",
-      payload: {
-        progress: SLEEP_CYCLE_PROGRESS.projectGraphStart,
-      },
-    });
+    await markJobRunning(jobId, "clear_edges", SLEEP_CYCLE_PROGRESS.clearEdges);
 
     // Check node count
     const countResult = await session.run(
-      "MATCH (n:EpisodicNode) RETURN count(n) AS cnt"
+      "MATCH (n:MemoryNode) RETURN count(n) AS cnt"
     );
     const nodeCount = countResult.records[0].get("cnt").toNumber();
     if (nodeCount < 2) {
@@ -166,168 +119,258 @@ async function processSleepCycleJob(jobId: string): Promise<void> {
         jobId,
         stage: "completed",
         message: "Sleep cycle skipped because there are fewer than two MTM nodes",
-        payload: {
-          progress: SLEEP_CYCLE_PROGRESS.completed,
-          pruned: 0,
-          consolidated: 0,
-        },
+        payload: { progress: SLEEP_CYCLE_PROGRESS.completed, pruned: 0, consolidated: 0 },
       });
       return;
     }
 
     // ------------------------------------------------------------------
-    // 1. Project the in-memory graph for GDS algorithms
+    // Step 0. Clear all existing SIMILARITY edges
+    // GDS KNN write creates new edges; it does not upsert stale ones.
     // ------------------------------------------------------------------
-    const graphName = `nhrag_sleep_${Date.now()}`;
-
-    // Check MENTIONS coverage to decide which projection strategy to use.
-    // If >= 15% of EpisodicNodes have MENTIONS edges, use the bipartite Cypher
-    // projection (Jaccard topic-overlap weights). Otherwise fall back to the
-    // native SIMILAR_TO projection so isolated/unbackfilled nodes are not
-    // penalised during early rollout.
-    const { coverage: mentionsCoverage } = await checkMentionsCoverage(session);
-    const usesBipartiteProjection = mentionsCoverage >= MENTIONS_COVERAGE_THRESHOLD;
-    const weightProperty = usesBipartiteProjection ? "weight" : "combinedWeight";
-
-    if (usesBipartiteProjection) {
-      await session.run(
-        `CALL gds.graph.project($graphName, $nodeQuery, $relationshipQuery)`,
-        {
-          graphName,
-          nodeQuery: "MATCH (n:EpisodicNode) RETURN id(n) AS id",
-          relationshipQuery: BIPARTITE_RELATIONSHIP_QUERY,
-        }
-      );
-    } else {
-      await session.run(
-        `CALL gds.graph.project($graphName, $nodeLabels, $relationshipProjection)`,
-        {
-          graphName,
-          nodeLabels: SLEEP_CYCLE_NODE_LABELS,
-          relationshipProjection: SLEEP_CYCLE_RELATIONSHIP_PROJECTION,
-        }
-      );
-    }
-
-    await markJobRunning(jobId, "rank_nodes", SLEEP_CYCLE_PROGRESS.rankNodesStart);
+    await session.run("MATCH ()-[r:SIMILARITY]-() DELETE r");
     await recordPipelineEvent({
       jobId,
-      stage: "project_graph",
-      message: `Projected the MTM graph for sleep-cycle analytics (${usesBipartiteProjection ? `bipartite/topic-Jaccard, coverage=${(mentionsCoverage * 100).toFixed(1)}%` : "native/SIMILAR_TO fallback"})`,
-      payload: {
-        progress: SLEEP_CYCLE_PROGRESS.rankNodesStart,
-        nodeCount,
-        mentionsCoverage,
-        usesBipartiteProjection,
-      },
+      stage: "clear_edges",
+      message: "Cleared existing SIMILARITY edges before KNN rebuild",
+      payload: { progress: SLEEP_CYCLE_PROGRESS.clearEdges, nodeCount },
     });
 
     // ------------------------------------------------------------------
-    // 2. PageRank (Synaptic Pruning)
+    // Steps 1-3. KNN graph projection → build SIMILARITY edges via GDS
     // ------------------------------------------------------------------
+    await markJobRunning(jobId, "knn_project", SLEEP_CYCLE_PROGRESS.knnProject);
+    await session.run(
+      `CALL gds.graph.project($graphName,
+         { MemoryNode: { properties: ['embedding'] } },
+         {}
+       )`,
+      { graphName: knnGraphName }
+    );
+    knnGraphProjected = true;
+
+    await markJobRunning(jobId, "knn_write", SLEEP_CYCLE_PROGRESS.knnWrite);
+    const knnResult = await session.run(
+      `CALL gds.knn.write($graphName, {
+         nodeProperties:        ['embedding'],
+         topK:                  $topK,
+         sampleRate:            1.0,
+         randomJoins:           10,
+         writeRelationshipType: 'SIMILARITY',
+         writeProperty:         'weight',
+         similarityCutoff:      $cutoff,
+         concurrency:           4
+       })
+       YIELD nodesCompared, relationshipsWritten`,
+      { graphName: knnGraphName, topK: KNN_TOP_K, cutoff: KNN_SIMILARITY_CUTOFF }
+    );
+    const nodesCompared       = knnResult.records[0].get("nodesCompared").toNumber();
+    const relationshipsWritten = knnResult.records[0].get("relationshipsWritten").toNumber();
+
+    // Stamp updatedAt on new edges
+    const now = new Date().toISOString();
+    await session.run(
+      "MATCH ()-[r:SIMILARITY]-() WHERE r.updatedAt IS NULL SET r.updatedAt = $now",
+      { now }
+    );
+
+    await session.run(`CALL gds.graph.drop($graphName)`, { graphName: knnGraphName });
+    knnGraphProjected = false;
+
+    await recordPipelineEvent({
+      jobId,
+      stage: "knn_write",
+      message: `KNN complete: ${nodesCompared} nodes compared, ${relationshipsWritten} SIMILARITY edges written`,
+      payload: {
+        progress: SLEEP_CYCLE_PROGRESS.knnWrite,
+        nodesCompared,
+        relationshipsWritten,
+        cutoff: KNN_SIMILARITY_CUTOFF,
+        topK: KNN_TOP_K,
+      },
+    });
+
+    if (relationshipsWritten === 0) {
+      await markJobCompleted(jobId, "completed", 100, { pruned: 0, consolidated: 0 });
+      await recordPipelineEvent({
+        jobId,
+        stage: "completed",
+        message: "Sleep cycle skipped: no SIMILARITY edges above threshold — all nodes are below cosine cutoff",
+        payload: { progress: SLEEP_CYCLE_PROGRESS.completed },
+      });
+      return;
+    }
+
+    // ------------------------------------------------------------------
+    // Steps 4-8. Analytics graph → PageRank → compute τ → identify prune set
+    // ------------------------------------------------------------------
+    await markJobRunning(jobId, "rank_nodes", SLEEP_CYCLE_PROGRESS.analyticsProject);
+    await session.run(
+      `CALL gds.graph.project($graphName, $nodeLabels, $relationshipProjection)`,
+      {
+        graphName: analyticsGraphName,
+        nodeLabels: ["MemoryNode"],
+        relationshipProjection: { SIMILARITY: { orientation: "UNDIRECTED", properties: ["weight"] } },
+      }
+    );
+    analyticsGraphProjected = true;
+
+    await markJobRunning(jobId, "rank_nodes", SLEEP_CYCLE_PROGRESS.rankNodesStart);
     const prResult = await session.run(
       `CALL gds.pageRank.stream($graphName, {
-        relationshipWeightProperty: '${weightProperty}',
-        dampingFactor: 0.85
-      })
-      YIELD nodeId, score
-      RETURN gds.util.asNode(nodeId).nodeId AS graphNodeId,
-             score
-      ORDER BY score ASC`,
-      { graphName }
+         relationshipWeightProperty: 'weight',
+         dampingFactor: 0.85,
+         maxIterations: 40
+       })
+       YIELD nodeId, score
+       RETURN gds.util.asNode(nodeId).nodeId AS graphNodeId, score
+       ORDER BY score ASC`,
+      { graphName: analyticsGraphName }
     );
 
     const scores: PageRankScore[] = prResult.records.map((r) => ({
       graphNodeId: String(r.get("graphNodeId") ?? ""),
       score: Number(r.get("score") ?? 0),
     }));
-    const episodicScores = scores.filter((score) => score.graphNodeId.length > 0);
+    const episodicScores = scores.filter((s) => s.graphNodeId.length > 0);
 
-    // Write PageRank back to nodes for reference
     await session.run(
       `CALL gds.pageRank.write($graphName, {
-        relationshipWeightProperty: '${weightProperty}',
-        dampingFactor: 0.85,
-        writeProperty: 'pageRank'
-      })`,
-      { graphName }
+         relationshipWeightProperty: 'weight',
+         dampingFactor: 0.85,
+         maxIterations: 40,
+         writeProperty: 'pageRank'
+       })`,
+      { graphName: analyticsGraphName }
     );
-
-    // Calculate pruning threshold (bottom 25th percentile)
-    const sorted = episodicScores.map((s) => s.score).sort((a, b) => a - b);
-    const thresholdIdx = Math.floor(
-      (SALIENCE_PERCENTILE / 100) * sorted.length
-    );
-    const threshold = sorted[thresholdIdx] ?? 0;
-    const nodesToPrune = episodicScores
-      .filter((s) => s.score < threshold)
-      .map((s) => s.graphNodeId);
     await markJobRunning(jobId, "rank_nodes", SLEEP_CYCLE_PROGRESS.rankNodesComplete);
+
+    // Compute τ with adaptive guards
+    const sorted = episodicScores.map((s) => s.score).sort((a, b) => a - b);
+    let nodesToPrune: string[] = [];
+    let threshold = 0;
+    let pruningSkipReason: string | null = null;
+
+    if (episodicScores.length < MIN_NODES_FOR_PRUNING) {
+      pruningSkipReason = `graph has only ${episodicScores.length} nodes (minimum ${MIN_NODES_FOR_PRUNING})`;
+    } else {
+      const mean = sorted.reduce((a, b) => a + b, 0) / sorted.length;
+      const scoreRange = sorted[sorted.length - 1] - sorted[0];
+      if (scoreRange < MIN_SCORE_VARIANCE_RATIO * mean) {
+        pruningSkipReason = "PageRank scores are nearly uniform — no clear low-salience nodes";
+      } else {
+        const thresholdIdx = Math.floor((SALIENCE_PERCENTILE / 100) * sorted.length);
+        threshold = sorted[thresholdIdx] ?? 0;
+        const candidates = episodicScores
+          .filter((s) => s.score < threshold)
+          .map((s) => s.graphNodeId);
+        const maxPrunable = Math.floor(MAX_PRUNE_FRACTION * episodicScores.length);
+        nodesToPrune = candidates.slice(0, maxPrunable);
+      }
+    }
+
     await recordPipelineEvent({
       jobId,
       stage: "rank_nodes",
-      message: "Calculated PageRank scores",
+      message: pruningSkipReason
+        ? `PageRank computed but pruning skipped: ${pruningSkipReason}`
+        : `PageRank computed: τ=${threshold.toFixed(4)}, ${nodesToPrune.length} nodes flagged for pruning`,
       payload: {
         progress: SLEEP_CYCLE_PROGRESS.rankNodesComplete,
         nodeCount,
         episodicNodeCount: episodicScores.length,
         threshold,
         nodesToPrune: nodesToPrune.length,
+        pruningSkipReason,
       },
     });
 
+    await session.run(`CALL gds.graph.drop($graphName)`, { graphName: analyticsGraphName });
+    analyticsGraphProjected = false;
+
     // ------------------------------------------------------------------
-    // 3. Community Detection (Leiden with Louvain fallback)
+    // Step 9. Synaptic pruning — BEFORE Louvain to keep community quality high
     // ------------------------------------------------------------------
+    if (nodesToPrune.length > 0) {
+      await session.run(
+        `MATCH (n:MemoryNode) WHERE n.nodeId IN $ids DETACH DELETE n`,
+        { ids: nodesToPrune }
+      );
+    }
+    // Always clean up orphaned TopicNodes
+    try {
+      await session.run(
+        `MATCH (t:TopicNode)
+         WHERE NOT (t)<-[:MENTIONS]-(:MemoryNode)
+         DETACH DELETE t`
+      );
+    } catch (orphanError) {
+      console.warn("[consolidationService] Orphaned TopicNode cleanup failed (non-fatal):", orphanError);
+    }
+
+    // ------------------------------------------------------------------
+    // Steps 10-12. Louvain graph → community detection on the clean graph
+    // ------------------------------------------------------------------
+    await markJobRunning(jobId, "cluster_communities", SLEEP_CYCLE_PROGRESS.clusterCommunities);
+    await session.run(
+      `CALL gds.graph.project($graphName, $nodeLabels, $relationshipProjection)`,
+      {
+        graphName: louvainGraphName,
+        nodeLabels: ["MemoryNode"],
+        relationshipProjection: { SIMILARITY: { orientation: "UNDIRECTED", properties: ["weight"] } },
+      }
+    );
+    louvainGraphProjected = true;
+
     try {
       await session.run(
         `CALL gds.leiden.write($graphName, {
-          relationshipWeightProperty: '${weightProperty}',
-          writeProperty: 'communityId',
-          gamma: 1.0,
-          theta: 0.01
-        })`,
-        { graphName }
+           relationshipWeightProperty: 'weight',
+           writeProperty: 'communityId',
+           gamma: 1.0,
+           theta: 0.01
+         })`,
+        { graphName: louvainGraphName }
       );
     } catch (error) {
       console.warn("gds.leiden not available, falling back to gds.louvain:", error);
       await session.run(
         `CALL gds.louvain.write($graphName, {
-          relationshipWeightProperty: '${weightProperty}',
-          writeProperty: 'communityId',
-          tolerance: 0.0001,
-          maxIterations: 20
-        })`,
-        { graphName }
+           relationshipWeightProperty: 'weight',
+           writeProperty: 'communityId',
+           tolerance: 0.0001,
+           maxIterations: 20
+         })`,
+        { graphName: louvainGraphName }
       );
     }
-    await markJobRunning(jobId, "cluster_communities", SLEEP_CYCLE_PROGRESS.clusterCommunities);
 
-    // Read communities (excluding pruned nodes), including flattened entity keys
+    await session.run(`CALL gds.graph.drop($graphName)`, { graphName: louvainGraphName });
+    louvainGraphProjected = false;
+
+    // ------------------------------------------------------------------
+    // Steps 13-14. Read communities — no mergeBridgedCommunities
+    // ------------------------------------------------------------------
     const commResult = await session.run(
-      `MATCH (n:EpisodicNode)
+      `MATCH (n:MemoryNode)
        WHERE n.communityId IS NOT NULL AND NOT n.nodeId IN $pruned
-       WITH n
-       OPTIONAL MATCH (n)-[:MENTIONS]->(t:TopicNode)
-       RETURN n.communityId                AS cid,
-              collect(DISTINCT n.nodeId)   AS nodeIds,
-              collect(DISTINCT n.content)  AS contents,
-              collect(DISTINCT t.topicId)  AS topicKeys`,
+       WITH n.communityId AS cid,
+            collect(n.nodeId)  AS nodeIds,
+            collect(n.content) AS contents
+       RETURN cid, nodeIds, contents
+       ORDER BY cid`,
       { pruned: nodesToPrune }
     );
 
-    // Parse raw records, merge bridged communities, then filter by minimum size
     const communityRecords: CommunityRecord[] = commResult.records.map((record) => ({
       cid: record.get("cid"),
       nodeIds: record.get("nodeIds") as string[],
       contents: record.get("contents") as string[],
-      entityKeys: (record.get("topicKeys") as Array<string | null>).filter((k): k is string => k !== null),
     }));
-    // Topic sets are smaller than old entity key arrays — lower threshold to 2
-    const mergedCommunityRecords = mergeBridgedCommunities(communityRecords, 2);
-    const eligibleCommunities = mergedCommunityRecords.filter(
+    const eligibleCommunities = communityRecords.filter(
       (record) => record.nodeIds.length >= MIN_COMMUNITY_SIZE
     );
+
     await recordPipelineEvent({
       jobId,
       stage: "cluster_communities",
@@ -340,7 +383,7 @@ async function processSleepCycleJob(jobId: string): Promise<void> {
     });
 
     // ------------------------------------------------------------------
-    // 4. Distill surviving communities to LTM
+    // Step 15. Distill surviving communities to LTM
     // ------------------------------------------------------------------
     const provider = getProvider();
     let consolidatedCount = 0;
@@ -368,9 +411,9 @@ async function processSleepCycleJob(jobId: string): Promise<void> {
       const nodeIds = record.nodeIds;
       const contents = record.contents;
 
-      // Fetch topic context from the bipartite graph (primary source)
+      // Fetch topic context exclusively from bipartite MENTIONS edges
       const topicContextResult = await session.run(
-        `MATCH (c:EpisodicNode)-[m:MENTIONS]->(t:TopicNode)
+        `MATCH (c:MemoryNode)-[m:MENTIONS]->(t:TopicNode)
          WHERE c.nodeId IN $nodeIds AND NOT c.nodeId IN $pruned
          RETURN t.topicId          AS topicId,
                 t.entityType        AS entityType,
@@ -381,7 +424,7 @@ async function processSleepCycleJob(jobId: string): Promise<void> {
       );
 
       const topicRelTypeResult = await session.run(
-        `MATCH (c:EpisodicNode)-[m:MENTIONS]->(t:TopicNode)
+        `MATCH (c:MemoryNode)-[m:MENTIONS]->(t:TopicNode)
          WHERE c.nodeId IN $nodeIds AND NOT c.nodeId IN $pruned
          WITH t, m.relationshipType AS relType, sum(m.mentionCount) AS relCount
          ORDER BY t.topicId ASC, relCount DESC
@@ -390,16 +433,6 @@ async function processSleepCycleJob(jobId: string): Promise<void> {
         { nodeIds, pruned: nodesToPrune }
       );
 
-      // Fallback: legacy semanticPayloadJson for nodes not yet backfilled with MENTIONS edges
-      const legacyResult = await session.run(
-        `MATCH (c:EpisodicNode)
-         WHERE c.nodeId IN $nodeIds AND NOT c.nodeId IN $pruned
-           AND NOT (c)-[:MENTIONS]->(:TopicNode)
-         RETURN collect(coalesce(c.semanticPayloadJson, '[]')) AS legacyPayloads`,
-        { nodeIds, pruned: nodesToPrune }
-      );
-
-      // Build SemanticCommunityEntity list from TopicNode graph rows
       const topicRows: CommunityTopicRow[] = topicContextResult.records.map((r) => ({
         topicId: r.get("topicId") as string,
         entityType: r.get("entityType") as string,
@@ -415,14 +448,14 @@ async function processSleepCycleJob(jobId: string): Promise<void> {
         );
       }
 
-      const bipartiteEntities: SemanticCommunityEntity[] = topicRows.map((row) => ({
+      const semanticEntities: SemanticCommunityEntity[] = topicRows.map((row) => ({
         entityId: row.topicId,
         entityType: row.entityType,
         canonicalName: row.canonicalName,
         mentionCount: row.totalMentionCount,
       }));
 
-      const bipartiteRelations: SemanticCommunityRelation[] = bipartiteEntities.flatMap((entity) => {
+      const semanticRelations: SemanticCommunityRelation[] = semanticEntities.flatMap((entity) => {
         const relTypes = relTypeMap.get(entity.entityId) ?? [];
         return relTypes.map((rt) => ({
           relationshipType: rt.relationshipType,
@@ -433,25 +466,9 @@ async function processSleepCycleJob(jobId: string): Promise<void> {
         }));
       });
 
-      // Merge legacy fallback for unbackfilled nodes
-      const legacyPayloads = (legacyResult.records[0]?.get("legacyPayloads") as string[] | null) ?? [];
-      const legacySemanticContext = buildCommunitySemanticContext(
-        legacyPayloads.flatMap((p) => parseStoredSemanticEntities(p))
-      );
-
-      const entityIdsSeen = new Set(bipartiteEntities.map((e) => e.entityId));
-      const mergedEntities: SemanticCommunityEntity[] = [
-        ...bipartiteEntities,
-        ...legacySemanticContext.semanticEntities.filter((e) => !entityIdsSeen.has(e.entityId)),
-      ];
-      const mergedRelations: SemanticCommunityRelation[] = [
-        ...bipartiteRelations,
-        ...legacySemanticContext.semanticRelations,
-      ];
-
-      const conceptAnchors = buildConceptAnchors(mergedEntities);
+      const conceptAnchors = buildConceptAnchors(semanticEntities);
       const distilledFact = await provider.generate(
-        buildDistillationPrompt(contents, mergedEntities, mergedRelations, conceptAnchors)
+        buildDistillationPrompt(contents, semanticEntities, semanticRelations, conceptAnchors)
       );
 
       if (distilledFact) {
@@ -459,9 +476,9 @@ async function processSleepCycleJob(jobId: string): Promise<void> {
         await storeFact(distilledFact, embedding, nodeIds, {
           communityId: normalizeNeo4jNumber(communityId),
           communitySize: nodeIds.length,
-          semanticEntityCount: mergedEntities.length,
-          semanticRelationCount: mergedRelations.length,
-          semanticAnchors: mergedEntities
+          semanticEntityCount: semanticEntities.length,
+          semanticRelationCount: semanticRelations.length,
+          semanticAnchors: semanticEntities
             .slice()
             .sort((left, right) => right.mentionCount - left.mentionCount)
             .slice(0, 12)
@@ -514,34 +531,11 @@ async function processSleepCycleJob(jobId: string): Promise<void> {
       });
     }
 
-    // ------------------------------------------------------------------
-    // 5. Execute Synaptic Pruning
-    // ------------------------------------------------------------------
-    if (nodesToPrune.length > 0) {
-      await session.run(
-        `MATCH (n:EpisodicNode) WHERE n.nodeId IN $ids DETACH DELETE n`,
-        { ids: nodesToPrune }
-      );
-
-      // Clean up TopicNodes that are no longer referenced by any EpisodicNode.
-      // Non-fatal — orphaned topics have no impact on GDS projections but waste storage.
-      if (nodesToPrune.length > 10) {
-        try {
-          await session.run(
-            `MATCH (t:TopicNode)
-             WHERE NOT (t)<-[:MENTIONS]-(:EpisodicNode)
-             DETACH DELETE t`
-          );
-        } catch (orphanError) {
-          console.warn("[consolidationService] Orphaned TopicNode cleanup failed (non-fatal):", orphanError);
-        }
-      }
-    }
     await markJobRunning(jobId, "cleanup", SLEEP_CYCLE_PROGRESS.cleanup);
     await recordPipelineEvent({
       jobId,
       stage: "cleanup",
-      message: "Pruned low-salience MTM nodes and finalized graph cleanup",
+      message: "MTM pruning and distillation complete",
       payload: {
         progress: SLEEP_CYCLE_PROGRESS.cleanup,
         pruned: nodesToPrune.length,
@@ -550,12 +544,7 @@ async function processSleepCycleJob(jobId: string): Promise<void> {
     });
 
     // ------------------------------------------------------------------
-    // 6. Drop the projected graph
-    // ------------------------------------------------------------------
-    await session.run(`CALL gds.graph.drop($graphName)`, { graphName });
-
-    // ------------------------------------------------------------------
-    // 7. STM Pruning — remove aged-out conversation entries and enforce per-session row caps
+    // Step 16. STM Pruning
     // ------------------------------------------------------------------
     let stmStats = { deletedByAge: 0, deletedByCount: 0 };
     try {
@@ -566,10 +555,7 @@ async function processSleepCycleJob(jobId: string): Promise<void> {
         jobId,
         stage: "stm_prune",
         message: `STM pruned: ${stmStats.deletedByAge} entries removed by age, ${stmStats.deletedByCount} removed by session count cap`,
-        payload: {
-          progress: SLEEP_CYCLE_PROGRESS.stmPrune,
-          ...stmStats,
-        },
+        payload: { progress: SLEEP_CYCLE_PROGRESS.stmPrune, ...stmStats },
       });
     } catch (stmError) {
       console.error("[consolidationService] STM prune failed:", stmError);
@@ -583,7 +569,7 @@ async function processSleepCycleJob(jobId: string): Promise<void> {
     }
 
     // ------------------------------------------------------------------
-    // 8. LTM Condensation — merge similar dormant facts into coarser summaries
+    // Step 17. LTM Condensation
     // ------------------------------------------------------------------
     let ltmStats = { clustersFound: 0, factsCondensed: 0, newFactsCreated: 0 };
     try {
@@ -597,10 +583,7 @@ async function processSleepCycleJob(jobId: string): Promise<void> {
           ltmStats.clustersFound > 0
             ? `LTM condensation: ${ltmStats.factsCondensed} dormant facts merged into ${ltmStats.newFactsCreated} coarser summaries across ${ltmStats.clustersFound} clusters`
             : "LTM condensation: no dormant fact clusters found",
-        payload: {
-          progress: SLEEP_CYCLE_PROGRESS.ltmCondense,
-          ...ltmStats,
-        },
+        payload: { progress: SLEEP_CYCLE_PROGRESS.ltmCondense, ...ltmStats },
       });
     } catch (ltmError) {
       console.error("[consolidationService] LTM condensation failed:", ltmError);
@@ -638,12 +621,22 @@ async function processSleepCycleJob(jobId: string): Promise<void> {
       stage: "failed",
       level: "error",
       message: "Sleep cycle failed",
-      payload: {
-        error: error instanceof Error ? error.message : String(error),
-      },
+      payload: { error: error instanceof Error ? error.message : String(error) },
     });
     throw error;
   } finally {
+    if (knnGraphProjected) {
+      try { await session.run(`CALL gds.graph.drop($graphName)`, { graphName: knnGraphName }); }
+      catch (e) { console.error("Failed to drop KNN graph:", e); }
+    }
+    if (analyticsGraphProjected) {
+      try { await session.run(`CALL gds.graph.drop($graphName)`, { graphName: analyticsGraphName }); }
+      catch (e) { console.error("Failed to drop analytics graph:", e); }
+    }
+    if (louvainGraphProjected) {
+      try { await session.run(`CALL gds.graph.drop($graphName)`, { graphName: louvainGraphName }); }
+      catch (e) { console.error("Failed to drop Louvain graph:", e); }
+    }
     await session.close();
   }
 }
@@ -775,103 +768,4 @@ function normalizeNeo4jNumber(value: unknown) {
   }
 
   return Number(value ?? 0);
-}
-
-function buildCommunitySemanticContext(entities: StoredSemanticEntity[]) {
-  const mergedEntities = new Map<string, SemanticCommunityEntity>();
-  const mergedRelations = new Map<string, SemanticCommunityRelation>();
-
-  for (const entity of entities) {
-    const entityKey = entity.entityId;
-    const relationKey = `${entity.relationshipType}:${entity.entityId}`;
-    const existingEntity = mergedEntities.get(entityKey);
-    const nextMentionCount = (existingEntity?.mentionCount ?? 0) + Math.max(entity.mentionCount, 1);
-
-    mergedEntities.set(entityKey, {
-      entityId: entity.entityId,
-      entityType: entity.entityType,
-      canonicalName:
-        existingEntity && existingEntity.canonicalName.length > entity.canonicalName.length
-          ? existingEntity.canonicalName
-          : entity.canonicalName,
-      mentionCount: nextMentionCount,
-    });
-
-    const existingRelation = mergedRelations.get(relationKey);
-    mergedRelations.set(relationKey, {
-      relationshipType: entity.relationshipType,
-      entityType: entity.entityType,
-      canonicalName:
-        existingRelation && existingRelation.canonicalName.length > entity.canonicalName.length
-          ? existingRelation.canonicalName
-          : entity.canonicalName,
-      confidence: Math.max(existingRelation?.confidence ?? 0, entity.confidence),
-      relationshipHint: existingRelation?.relationshipHint ?? entity.relationshipHint,
-    });
-  }
-
-  return {
-    semanticEntities: Array.from(mergedEntities.values()),
-    semanticRelations: Array.from(mergedRelations.values()),
-  };
-}
-
-function mergeBridgedCommunities(
-  records: CommunityRecord[],
-  minSharedKeys: number = 3
-): CommunityRecord[] {
-  const n = records.length;
-
-  // Union-Find with path compression
-  const parent = Array.from({ length: n }, (_, i) => i);
-
-  function find(x: number): number {
-    if (parent[x] !== x) {
-      parent[x] = find(parent[x]);
-    }
-    return parent[x];
-  }
-
-  function union(x: number, y: number): void {
-    parent[find(x)] = find(y);
-  }
-
-  // Pre-build Sets for O(1) membership checks during pair comparisons
-  const keySets = records.map((r) => new Set(r.entityKeys));
-
-  // Check all pairs; union those with >= minSharedKeys overlap
-  for (let i = 0; i < n; i++) {
-    for (let j = i + 1; j < n; j++) {
-      let sharedCount = 0;
-      for (const key of keySets[i]) {
-        if (keySets[j].has(key)) {
-          sharedCount++;
-          if (sharedCount >= minSharedKeys) break;
-        }
-      }
-      if (sharedCount >= minSharedKeys) {
-        union(i, j);
-      }
-    }
-  }
-
-  // Group records by their root representative
-  const groups = new Map<number, CommunityRecord[]>();
-  for (let i = 0; i < n; i++) {
-    const root = find(i);
-    const group = groups.get(root) ?? [];
-    group.push(records[i]);
-    groups.set(root, group);
-  }
-
-  // Merge each group into a single CommunityRecord; singletons pass through unchanged
-  return Array.from(groups.values()).map((group) => {
-    if (group.length === 1) return group[0];
-    return {
-      cid: group[0].cid,
-      nodeIds: group.flatMap((r) => r.nodeIds),
-      contents: group.flatMap((r) => r.contents),
-      entityKeys: Array.from(new Set(group.flatMap((r) => r.entityKeys))),
-    };
-  });
 }

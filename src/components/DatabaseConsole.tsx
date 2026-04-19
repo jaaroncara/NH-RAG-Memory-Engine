@@ -383,10 +383,9 @@ export default function DatabaseConsole() {
       nodeCount: 0,
       edgeCount: 0,
       communityCount: 0,
-      episodicNodeCount: 0,
-      annotatedNodeCount: 0,
+      documentNodeCount: 0,
+      chatNodeCount: 0,
       similarityEdgeCount: 0,
-      overlapEdgeCount: 0,
       topicNodeCount: 0,
       mentionEdgeCount: 0,
     },
@@ -1395,9 +1394,9 @@ function MtmView({ graph }: { graph: GraphSnapshot }) {
       <div className="grid gap-4 grid-cols-2 md:grid-cols-4 xl:grid-cols-7">
         {[
           { label: "Nodes", value: graph.stats.nodeCount },
-          { label: "Annotated Nodes", value: graph.stats.annotatedNodeCount },
+          { label: "Document Memory", value: graph.stats.documentNodeCount },
+          { label: "Chat Memory", value: graph.stats.chatNodeCount },
           { label: "Similarity Edges", value: graph.stats.similarityEdgeCount },
-          { label: "Overlap Edges", value: graph.stats.overlapEdgeCount },
           { label: "Topic Nodes", value: graph.stats.topicNodeCount },
           { label: "Mention Edges", value: graph.stats.mentionEdgeCount },
           { label: "Communities", value: graph.stats.communityCount },
@@ -1413,7 +1412,7 @@ function MtmView({ graph }: { graph: GraphSnapshot }) {
       <Card className="border-white/10 bg-white/[0.04] text-neutral-100 shadow-none">
         <CardHeader>
           <CardTitle>Medium-Term Memory Network</CardTitle>
-          <CardDescription className="text-neutral-400">A bipartite graph of chunk nodes and topic nodes connected by MENTIONS edges, with SIMILAR_TO similarity edges retained for cosine-overlap fallback. The graph can be panned, zoomed, and expanded into fullscreen for inspection.</CardDescription>
+          <CardDescription className="text-neutral-400">A bipartite graph of DocumentMemory and ChatMemory nodes connected by SIMILARITY (cosine) edges, with MENTIONS edges linking memory nodes to TopicNodes. The graph can be panned, zoomed, and expanded into fullscreen for inspection.</CardDescription>
         </CardHeader>
         <CardContent className="pt-0">
           <MtmGraph graph={graph} />

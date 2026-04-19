@@ -5,40 +5,23 @@ import { normalizeEmbedding } from "../embeddings.js";
 import { getProvider } from "../providers/index.js";
 import {
   extractSemanticEntities,
-  type SemanticEntityType,
-  type SemanticRelationshipType,
 } from "./entityExtractionService.js";
-import {
-  buildSemanticEdgeProperties,
-  buildSemanticNodeProperties,
-  parseSharedSemanticEntities,
-  parseStoredSemanticEntities,
-  type SharedSemanticEntity,
-  type StoredSemanticEntity,
-} from "./semanticGraphAttributes.js";
 
 export interface GraphNode {
   nodeId: string;
-  type: "episodic" | "chunk";
+  memoryType: "document" | "chat";
   content: string;
   displayLabel: string;
   consolidatedAt: string;
   pageRank?: number;
   communityId?: number;
-  semanticEntityCount: number;
-  semanticMaxConfidence: number;
-  semanticEntities: StoredSemanticEntity[];
 }
 
 export interface GraphEdge {
   source: string;
   target: string;
   weight: number;
-  type: "SIMILAR_TO";
-  cosineWeight: number;
-  semanticOverlapWeight: number;
-  sharedEntityCount: number;
-  sharedEntities: SharedSemanticEntity[];
+  type: "SIMILARITY";
   updatedAt?: string;
 }
 
@@ -49,7 +32,7 @@ export interface TopicNodeRecord {
   aliases: string[];
   mentionCount: number;
   confidence: number;
-  lastMentionedAt: string;
+  lastMentionedAt: string | null;
 }
 
 export interface MentionsEdge {
@@ -69,72 +52,25 @@ export interface GraphSnapshot {
     nodeCount: number;
     edgeCount: number;
     communityCount: number;
-    episodicNodeCount: number;
-    annotatedNodeCount: number;
+    documentNodeCount: number;
+    chatNodeCount: number;
     similarityEdgeCount: number;
-    overlapEdgeCount: number;
     topicNodeCount: number;
     mentionEdgeCount: number;
   };
 }
 
-const SIMILARITY_THRESHOLD = 0.72;
-const MTM_GRAPH_NODE_LABELS = ["EpisodicNode"];
+const MTM_GRAPH_NODE_LABELS = ["MemoryNode"];
 const MTM_GRAPH_RELATIONSHIP_PROJECTION = {
-  SIMILAR_TO: { orientation: "UNDIRECTED", properties: ["combinedWeight"] },
+  SIMILARITY: { orientation: "UNDIRECTED", properties: ["weight"] },
 };
-const MENTIONS_COVERAGE_THRESHOLD = 0.15;
-
-const BIPARTITE_RELATIONSHIP_QUERY = `
-MATCH (c1:EpisodicNode)-[:MENTIONS]->(t:TopicNode)<-[:MENTIONS]-(c2:EpisodicNode)
-WHERE id(c1) < id(c2)
-WITH c1, c2, count(DISTINCT t) AS intersection
-WHERE intersection > 0
-MATCH (c1)-[:MENTIONS]->(allT1:TopicNode)
-WITH c1, c2, intersection, count(DISTINCT allT1) AS c1Topics
-MATCH (c2)-[:MENTIONS]->(allT2:TopicNode)
-WITH c1, c2, intersection, c1Topics, count(DISTINCT allT2) AS c2Topics
-WHERE (c1Topics + c2Topics - intersection) > 0
-RETURN id(c1) AS source,
-       id(c2) AS target,
-       toFloat(intersection) / (c1Topics + c2Topics - intersection) AS weight
-
-UNION ALL
-
-MATCH (c1:EpisodicNode)-[r:SIMILAR_TO]-(c2:EpisodicNode)
-WHERE id(c1) < id(c2)
-  AND NOT (c1)-[:MENTIONS]->(:TopicNode)<-[:MENTIONS]-(c2)
-RETURN id(c1) AS source,
-       id(c2) AS target,
-       coalesce(r.combinedWeight, r.weight, 0.75) AS weight
-`;
 
 export type RefreshMtmGraphAnalyticsStep = "projected" | "ranked" | "clustered";
 
-async function checkMentionsCoverage(
-  session: Session
-): Promise<{ totalNodes: number; coverage: number }> {
-  const result = await session.run(
-    `MATCH (n:EpisodicNode)
-     WITH count(n) AS totalNodes
-     MATCH (n2:EpisodicNode)-[:MENTIONS]->(:TopicNode)
-     WITH totalNodes, count(DISTINCT n2) AS nodesWithMentions
-     RETURN totalNodes, toFloat(nodesWithMentions) / totalNodes AS coverage`
-  );
-  const record = result.records[0];
-  if (!record) return { totalNodes: 0, coverage: 0 };
-  const rawTotal = record.get("totalNodes");
-  const totalNodes =
-    typeof rawTotal === "object" && rawTotal !== null && "toNumber" in rawTotal
-      ? (rawTotal as { toNumber(): number }).toNumber()
-      : Number(rawTotal);
-  const coverage = Number(record.get("coverage") ?? 0);
-  return { totalNodes, coverage };
-}
-
 export async function consolidateToMTM(
   interactionId: string,
-  content: string
+  content: string,
+  memoryType: "document" | "chat" = "chat"
 ): Promise<string> {
   const provider = getProvider();
   const [rawEmbedding, semanticEntities] = await Promise.all([
@@ -145,44 +81,31 @@ export async function consolidateToMTM(
     }),
   ]);
   const embedding = normalizeEmbedding(rawEmbedding);
-  const semanticNodeProperties = buildSemanticNodeProperties(semanticEntities);
   const driver = getNeo4jDriver();
   const session = driver.session();
   const consolidatedAt = new Date().toISOString();
+  const nodeLabel = memoryType === "document" ? "DocumentMemory" : "ChatMemory";
 
   try {
-    // 1. Create the ChunkNode with dual label for backward compat with EpisodicNode consumers
+    // 1. Create the MemoryNode — minimal schema, no SIMILARITY edges at insert time
     await session.run(
-      `CREATE (n:EpisodicNode:ChunkNode {
-        nodeId: $nodeId,
-        type: 'chunk',
-        content: $content,
-        embedding: $embedding,
-        consolidatedAt: $consolidatedAt,
-        semanticEntityCount: $semanticEntityCount,
-        semanticEntityKeys: $semanticEntityKeys,
-        semanticEntityNames: $semanticEntityNames,
-        semanticEntityTypes: $semanticEntityTypes,
-        semanticRelationshipTypes: $semanticRelationshipTypes,
-        semanticMaxConfidence: $semanticMaxConfidence,
-        semanticPayloadJson: $semanticPayloadJson
+      `CREATE (n:MemoryNode:\`${nodeLabel}\` {
+        nodeId:         $nodeId,
+        memoryType:     $memoryType,
+        content:        $content,
+        embedding:      $embedding,
+        consolidatedAt: $consolidatedAt
       })`,
       {
         nodeId: interactionId,
+        memoryType,
         content,
         embedding,
         consolidatedAt,
-        semanticEntityCount: semanticNodeProperties.semanticEntityCount,
-        semanticEntityKeys: semanticNodeProperties.semanticEntityKeys,
-        semanticEntityNames: semanticNodeProperties.semanticEntityNames,
-        semanticEntityTypes: semanticNodeProperties.semanticEntityTypes,
-        semanticRelationshipTypes: semanticNodeProperties.semanticRelationshipTypes,
-        semanticMaxConfidence: semanticNodeProperties.semanticMaxConfidence,
-        semanticPayloadJson: semanticNodeProperties.semanticPayloadJson,
       }
     );
 
-    // 1b. Create/merge TopicNodes and MENTIONS edges for each extracted entity
+    // 2. Create/merge TopicNodes and MENTIONS edges for each extracted entity
     if (semanticEntities.length > 0) {
       const topicParams = semanticEntities.map((entity) => ({
         topicId: entity.entityId,
@@ -214,7 +137,7 @@ export async function consolidateToMTM(
              ELSE t.canonicalName
            END
          WITH t, topic
-         MATCH (c:ChunkNode { nodeId: $nodeId })
+         MATCH (c:MemoryNode { nodeId: $nodeId })
          MERGE (c)-[m:MENTIONS]->(t)
          ON CREATE SET
            m.confidence = topic.confidence,
@@ -227,62 +150,6 @@ export async function consolidateToMTM(
       );
     }
 
-    // 2. Build similarity edges with existing nodes (retained for GDS PageRank/Louvain fallback)
-    const result = await session.run(
-      `MATCH (existing:EpisodicNode)
-       WHERE existing.nodeId <> $nodeId AND existing.embedding IS NOT NULL
-       RETURN existing.nodeId AS id,
-              existing.embedding AS emb,
-              coalesce(existing.semanticPayloadJson, '[]') AS semanticPayloadJson`,
-      { nodeId: interactionId }
-    );
-
-    for (const record of result.records) {
-      const otherId = record.get("id");
-      const otherEmb = normalizeEmbedding(record.get("emb") as number[]);
-      const sim = cosineSimilarity(embedding, otherEmb);
-
-      if (sim > SIMILARITY_THRESHOLD) {
-        const otherSemanticEntities = parseStoredSemanticEntities(
-          record.get("semanticPayloadJson") as string
-        );
-        const edgeProperties = buildSemanticEdgeProperties(
-          semanticNodeProperties.semanticEntities,
-          otherSemanticEntities,
-          sim
-        );
-
-        await session.run(
-          `MATCH (a:EpisodicNode {nodeId: $a}), (b:EpisodicNode {nodeId: $b})
-           MERGE (a)-[r:SIMILAR_TO]-(b)
-           SET r.weight = $weight,
-               r.cosineWeight = $cosineWeight,
-               r.semanticOverlapWeight = $semanticOverlapWeight,
-               r.combinedWeight = $combinedWeight,
-               r.sharedEntityCount = $sharedEntityCount,
-               r.sharedEntityKeys = $sharedEntityKeys,
-               r.sharedEntityNames = $sharedEntityNames,
-               r.sharedEntityTypes = $sharedEntityTypes,
-               r.semanticOverlapJson = $semanticOverlapJson,
-               r.updatedAt = $updatedAt`,
-          {
-            a: interactionId,
-            b: otherId,
-            weight: edgeProperties.weight,
-            cosineWeight: edgeProperties.cosineWeight,
-            semanticOverlapWeight: edgeProperties.semanticOverlapWeight,
-            combinedWeight: edgeProperties.combinedWeight,
-            sharedEntityCount: neo4j.int(edgeProperties.sharedEntityCount),
-            sharedEntityKeys: edgeProperties.sharedEntityKeys,
-            sharedEntityNames: edgeProperties.sharedEntityNames,
-            sharedEntityTypes: edgeProperties.sharedEntityTypes,
-            semanticOverlapJson: edgeProperties.semanticOverlapJson,
-            updatedAt: consolidatedAt,
-          }
-        );
-      }
-    }
-
     return interactionId;
   } finally {
     await session.close();
@@ -293,7 +160,7 @@ export async function getMtmCount(): Promise<number> {
   const driver = getNeo4jDriver();
   const session = driver.session();
   try {
-    const result = await session.run("MATCH (n:EpisodicNode) RETURN count(n) AS cnt");
+    const result = await session.run("MATCH (n:MemoryNode) RETURN count(n) AS cnt");
     return result.records[0].get("cnt").toNumber();
   } finally {
     await session.close();
@@ -323,7 +190,7 @@ export async function getTopicNodes(limit?: number): Promise<TopicNodeRecord[]> 
         aliases: (props.aliases as string[]) ?? [],
         mentionCount,
         confidence: Number(props.confidence),
-        lastMentionedAt: props.lastMentionedAt as string,
+        lastMentionedAt: (props.lastMentionedAt as string | null) ?? null,
       };
     });
   } finally {
@@ -339,7 +206,7 @@ export async function getMentionEdges(nodeIds: string[]): Promise<MentionsEdge[]
   const session = driver.session();
   try {
     const result = await session.run(
-      `MATCH (c:ChunkNode)-[m:MENTIONS]->(t:TopicNode)
+      `MATCH (c:MemoryNode)-[m:MENTIONS]->(t:TopicNode)
        WHERE c.nodeId IN $nodeIds
        RETURN c.nodeId AS chunkId,
               t.topicId AS topicId,
@@ -376,41 +243,26 @@ export async function refreshMtmGraphAnalytics(options?: {
   let graphProjected = false;
 
   try {
-    const countResult = await session.run("MATCH (n:EpisodicNode) RETURN count(n) AS cnt");
+    const countResult = await session.run("MATCH (n:MemoryNode) RETURN count(n) AS cnt");
     const nodeCount = countResult.records[0].get("cnt").toNumber();
     if (nodeCount === 0) {
       return;
     }
 
-    const { coverage: mentionsCoverage } = await checkMentionsCoverage(session);
-    const usesBipartiteProjection = mentionsCoverage >= MENTIONS_COVERAGE_THRESHOLD;
-    const weightProperty = usesBipartiteProjection ? "weight" : "combinedWeight";
-
-    if (usesBipartiteProjection) {
-      await session.run(
-        `CALL gds.graph.project($graphName, $nodeQuery, $relationshipQuery)`,
-        {
-          graphName,
-          nodeQuery: "MATCH (n:EpisodicNode) RETURN id(n) AS id",
-          relationshipQuery: BIPARTITE_RELATIONSHIP_QUERY,
-        }
-      );
-    } else {
-      await session.run(
-        `CALL gds.graph.project($graphName, $nodeLabels, $relationshipProjection)`,
-        {
-          graphName,
-          nodeLabels: MTM_GRAPH_NODE_LABELS,
-          relationshipProjection: MTM_GRAPH_RELATIONSHIP_PROJECTION,
-        }
-      );
-    }
+    await session.run(
+      `CALL gds.graph.project($graphName, $nodeLabels, $relationshipProjection)`,
+      {
+        graphName,
+        nodeLabels: MTM_GRAPH_NODE_LABELS,
+        relationshipProjection: MTM_GRAPH_RELATIONSHIP_PROJECTION,
+      }
+    );
     graphProjected = true;
     await options?.onStep?.("projected");
 
     await session.run(
       `CALL gds.pageRank.write($graphName, {
-        relationshipWeightProperty: '${weightProperty}',
+        relationshipWeightProperty: 'weight',
         dampingFactor: 0.85,
         writeProperty: 'pageRank'
       })`,
@@ -421,7 +273,7 @@ export async function refreshMtmGraphAnalytics(options?: {
     try {
       await session.run(
         `CALL gds.leiden.write($graphName, {
-          relationshipWeightProperty: '${weightProperty}',
+          relationshipWeightProperty: 'weight',
           writeProperty: 'communityId',
           gamma: 1.0,
           theta: 0.01
@@ -432,7 +284,7 @@ export async function refreshMtmGraphAnalytics(options?: {
       console.warn("gds.leiden not available, falling back to gds.louvain:", error);
       await session.run(
         `CALL gds.louvain.write($graphName, {
-          relationshipWeightProperty: '${weightProperty}',
+          relationshipWeightProperty: 'weight',
           writeProperty: 'communityId'
         })`,
         { graphName }
@@ -458,20 +310,16 @@ export async function getGraphStats(): Promise<GraphSnapshot["stats"]> {
 
   try {
     const nodeResult = await session.run(
-      `MATCH (n:EpisodicNode)
+      `MATCH (n:MemoryNode)
        RETURN count(n) AS nodeCount,
-              count(n) AS episodicNodeCount,
-              coalesce(sum(CASE WHEN coalesce(n.semanticEntityCount, 0) > 0 THEN 1 ELSE 0 END), 0) AS annotatedNodeCount`
+              sum(CASE WHEN n:DocumentMemory THEN 1 ELSE 0 END) AS documentNodeCount,
+              sum(CASE WHEN n:ChatMemory THEN 1 ELSE 0 END) AS chatNodeCount`
     );
     const similarityEdgeResult = await session.run(
-      "MATCH ()-[r:SIMILAR_TO]-() RETURN count(r) AS similarityEdgeCount"
-    );
-    const overlapEdgeResult = await session.run(
-      `MATCH ()-[r:SIMILAR_TO]-()
-       RETURN coalesce(sum(CASE WHEN coalesce(r.sharedEntityCount, 0) > 0 THEN 1 ELSE 0 END), 0) AS overlapEdgeCount`
+      "MATCH ()-[r:SIMILARITY]-() RETURN count(r) / 2 AS similarityEdgeCount"
     );
     const communityResult = await session.run(
-      `MATCH (n:EpisodicNode)
+      `MATCH (n:MemoryNode)
        WHERE n.communityId IS NOT NULL
        RETURN count(DISTINCT n.communityId) AS communityCount`
     );
@@ -483,10 +331,9 @@ export async function getGraphStats(): Promise<GraphSnapshot["stats"]> {
     );
 
     const nodeCount = nodeResult.records[0].get("nodeCount").toNumber();
-    const episodicNodeCount = nodeResult.records[0].get("episodicNodeCount").toNumber();
-    const annotatedNodeCount = nodeResult.records[0].get("annotatedNodeCount").toNumber();
+    const documentNodeCount = nodeResult.records[0].get("documentNodeCount").toNumber();
+    const chatNodeCount = nodeResult.records[0].get("chatNodeCount").toNumber();
     const similarityEdgeCount = similarityEdgeResult.records[0].get("similarityEdgeCount").toNumber();
-    const overlapEdgeCount = overlapEdgeResult.records[0].get("overlapEdgeCount").toNumber();
     const communityCount = communityResult.records[0].get("communityCount").toNumber();
     const topicNodeCount = topicNodeResult.records[0].get("topicNodeCount").toNumber();
     const mentionEdgeCount = mentionEdgeResult.records[0].get("mentionEdgeCount").toNumber();
@@ -495,10 +342,9 @@ export async function getGraphStats(): Promise<GraphSnapshot["stats"]> {
       nodeCount,
       edgeCount: similarityEdgeCount,
       communityCount,
-      episodicNodeCount,
-      annotatedNodeCount,
+      documentNodeCount,
+      chatNodeCount,
       similarityEdgeCount,
-      overlapEdgeCount,
       topicNodeCount,
       mentionEdgeCount,
     };
@@ -516,56 +362,48 @@ export async function getGraphSnapshot(limit?: number): Promise<GraphSnapshot> {
       : undefined;
 
   try {
-    const episodicNodeQuery =
+    const nodeQuery =
       normalizedLimit === undefined
-        ? `MATCH (n:EpisodicNode)
+        ? `MATCH (n:MemoryNode)
            RETURN n.nodeId AS nodeId,
-                  n.type AS type,
+                  n.memoryType AS memoryType,
                   n.content AS content,
-                  n.content AS displayLabel,
                   n.consolidatedAt AS consolidatedAt,
                   coalesce(n.pageRank, 0.0) AS pageRank,
-                  coalesce(n.communityId, -1) AS communityId,
-              coalesce(n.semanticEntityCount, 0) AS semanticEntityCount,
-              coalesce(n.semanticMaxConfidence, 0.0) AS semanticMaxConfidence,
-              coalesce(n.semanticPayloadJson, '[]') AS semanticPayloadJson
+                  coalesce(n.communityId, -1) AS communityId
            ORDER BY n.consolidatedAt DESC`
-        : `MATCH (n:EpisodicNode)
+        : `MATCH (n:MemoryNode)
            RETURN n.nodeId AS nodeId,
-                  n.type AS type,
+                  n.memoryType AS memoryType,
                   n.content AS content,
-                  n.content AS displayLabel,
                   n.consolidatedAt AS consolidatedAt,
                   coalesce(n.pageRank, 0.0) AS pageRank,
-                  coalesce(n.communityId, -1) AS communityId,
-              coalesce(n.semanticEntityCount, 0) AS semanticEntityCount,
-              coalesce(n.semanticMaxConfidence, 0.0) AS semanticMaxConfidence,
-              coalesce(n.semanticPayloadJson, '[]') AS semanticPayloadJson
+                  coalesce(n.communityId, -1) AS communityId
            ORDER BY n.consolidatedAt DESC
            LIMIT $limit`;
 
-    const episodicNodeResult = await session.run(
-      episodicNodeQuery,
+    const nodeResult = await session.run(
+      nodeQuery,
       normalizedLimit === undefined ? {} : { limit: neo4j.int(normalizedLimit) }
     );
 
-    const episodicNodes = episodicNodeResult.records.map((record) => ({
-      nodeId: record.get("nodeId") as string,
-      type: (record.get("type") as string) === "chunk" ? ("chunk" as const) : ("episodic" as const),
-      content: record.get("content") as string,
-      displayLabel: (record.get("displayLabel") as string) ?? (record.get("content") as string),
-      consolidatedAt: record.get("consolidatedAt") as string,
-      pageRank: Number(record.get("pageRank") as number),
-      communityId: Number(record.get("communityId") as number),
-      semanticEntityCount: Number(record.get("semanticEntityCount") as number),
-      semanticMaxConfidence: Number(record.get("semanticMaxConfidence") as number),
-      semanticEntities: parseStoredSemanticEntities(
-        record.get("semanticPayloadJson") as string
-      ),
-    }));
+    const memoryNodes = nodeResult.records.map((record) => {
+      const rawType = record.get("memoryType") as string | null;
+      const memoryType: "document" | "chat" =
+        rawType === "document" ? "document" : "chat";
+      return {
+        nodeId: record.get("nodeId") as string,
+        memoryType,
+        content: record.get("content") as string,
+        displayLabel: record.get("content") as string,
+        consolidatedAt: record.get("consolidatedAt") as string,
+        pageRank: Number(record.get("pageRank") as number),
+        communityId: Number(record.get("communityId") as number),
+      };
+    });
 
-    const episodicNodeIds = episodicNodes.map((node) => node.nodeId);
-    if (episodicNodeIds.length === 0) {
+    const nodeIds = memoryNodes.map((node) => node.nodeId);
+    if (nodeIds.length === 0) {
       return {
         nodes: [],
         edges: [],
@@ -574,42 +412,28 @@ export async function getGraphSnapshot(limit?: number): Promise<GraphSnapshot> {
         stats: await getGraphStats(),
       };
     }
-    const nodes = episodicNodes;
 
     const edgeResult = await session.run(
-      `MATCH (a:EpisodicNode)-[r:SIMILAR_TO]-(b:EpisodicNode)
+      `MATCH (a:MemoryNode)-[r:SIMILARITY]-(b:MemoryNode)
        WHERE a.nodeId IN $nodeIds AND b.nodeId IN $nodeIds AND a.nodeId < b.nodeId
        RETURN a.nodeId AS source,
               b.nodeId AS target,
-              coalesce(r.combinedWeight, r.weight, 0.0) AS weight,
-              coalesce(r.cosineWeight, r.weight, 0.0) AS cosineWeight,
-              coalesce(r.semanticOverlapWeight, 0.0) AS semanticOverlapWeight,
-              coalesce(r.sharedEntityCount, 0) AS sharedEntityCount,
-              coalesce(r.semanticOverlapJson, '[]') AS semanticOverlapJson,
+              coalesce(r.weight, 0.0) AS weight,
               r.updatedAt AS updatedAt`,
-      { nodeIds: episodicNodeIds }
+      { nodeIds }
     );
 
-    const edges = edgeResult.records.map((record) => ({
+    const edges: GraphEdge[] = edgeResult.records.map((record) => ({
       source: record.get("source") as string,
       target: record.get("target") as string,
       weight: Number(record.get("weight") as number),
-      type: "SIMILAR_TO" as const,
-      cosineWeight: Number(record.get("cosineWeight") as number),
-      semanticOverlapWeight: Number(record.get("semanticOverlapWeight") as number),
-      sharedEntityCount: Number(record.get("sharedEntityCount") as number),
-      sharedEntities: parseSharedSemanticEntities(
-        record.get("semanticOverlapJson") as string
-      ),
+      type: "SIMILARITY" as const,
       updatedAt: (record.get("updatedAt") as string | null) ?? undefined,
     }));
 
-    // Fetch TopicNodes and MENTIONS edges for the chunks in view.
-    // Filter topicNodes to only those referenced by the returned mentionEdges so
-    // the snapshot contains no disconnected topic bubbles.
     const [allTopicNodes, mentionEdges] = await Promise.all([
       getTopicNodes(500),
-      getMentionEdges(episodicNodeIds),
+      getMentionEdges(nodeIds),
     ]);
     const referencedTopicIds = new Set(mentionEdges.map((e) => e.topicId));
     const topicNodes = allTopicNodes.filter((t) => referencedTopicIds.has(t.topicId));
@@ -617,26 +441,23 @@ export async function getGraphSnapshot(limit?: number): Promise<GraphSnapshot> {
     const stats =
       normalizedLimit === undefined
         ? {
-          nodeCount: nodes.length,
+          nodeCount: memoryNodes.length,
           edgeCount: edges.length,
           communityCount: new Set(
-            episodicNodes
+            memoryNodes
               .map((node) => node.communityId)
               .filter((value) => value !== undefined && value !== -1)
           ).size,
-          episodicNodeCount: episodicNodes.length,
-          annotatedNodeCount: episodicNodes.filter(
-            (node) => node.semanticEntityCount > 0
-          ).length,
+          documentNodeCount: memoryNodes.filter((n) => n.memoryType === "document").length,
+          chatNodeCount: memoryNodes.filter((n) => n.memoryType === "chat").length,
           similarityEdgeCount: edges.length,
-          overlapEdgeCount: edges.filter((edge) => edge.sharedEntityCount > 0).length,
           topicNodeCount: topicNodes.length,
           mentionEdgeCount: mentionEdges.length,
         }
         : await getGraphStats();
 
     return {
-      nodes,
+      nodes: memoryNodes,
       edges,
       topicNodes,
       mentionEdges,
@@ -645,15 +466,4 @@ export async function getGraphSnapshot(limit?: number): Promise<GraphSnapshot> {
   } finally {
     await session.close();
   }
-}
-
-function cosineSimilarity(a: number[], b: number[]): number {
-  let dot = 0, mA = 0, mB = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    mA += a[i] * a[i];
-    mB += b[i] * b[i];
-  }
-  const denom = Math.sqrt(mA) * Math.sqrt(mB);
-  return denom === 0 ? 0 : dot / denom;
 }

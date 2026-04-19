@@ -19,11 +19,25 @@ export async function initNeo4j(): Promise<void> {
   const d = getNeo4jDriver();
   const session = d.session();
   try {
-    // Create constraints
     await session.run(
-      "CREATE CONSTRAINT episodic_node_id IF NOT EXISTS FOR (n:EpisodicNode) REQUIRE n.nodeId IS UNIQUE"
+      "CREATE CONSTRAINT memory_node_id IF NOT EXISTS FOR (n:MemoryNode) REQUIRE n.nodeId IS UNIQUE"
     );
-    console.log("Neo4j constraints initialized");
+    await session.run(
+      "CREATE CONSTRAINT topic_node_id IF NOT EXISTS FOR (t:TopicNode) REQUIRE t.topicId IS UNIQUE"
+    );
+    await session.run(
+      "CREATE INDEX memory_node_memory_type IF NOT EXISTS FOR (n:MemoryNode) ON (n.memoryType)"
+    );
+    await session.run(
+      "CREATE INDEX memory_node_consolidated_at IF NOT EXISTS FOR (n:MemoryNode) ON (n.consolidatedAt)"
+    );
+    await session.run(
+      "CREATE INDEX memory_node_community_id IF NOT EXISTS FOR (n:MemoryNode) ON (n.communityId)"
+    );
+    await session.run(
+      "CREATE INDEX memory_node_page_rank IF NOT EXISTS FOR (n:MemoryNode) ON (n.pageRank)"
+    );
+    console.log("Neo4j constraints and indexes initialized");
   } finally {
     await session.close();
   }

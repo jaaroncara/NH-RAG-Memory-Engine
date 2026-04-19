@@ -6,7 +6,7 @@ import { db } from "../db/index.js";
 import { documentChunks, documents, ingestionJobs } from "../db/schema.js";
 import { chunkParsedDocument, parseDocumentWithDocling } from "./doclingService.js";
 import { createJob, listPipelineEvents, markJobCompleted, markJobFailed, markJobRunning, recordPipelineEvent } from "./jobService.js";
-import { consolidateToMTM, refreshMtmGraphAnalytics, type RefreshMtmGraphAnalyticsStep } from "./mtmService.js";
+import { consolidateToMTM } from "./mtmService.js";
 import { addDocumentChunksToSTM } from "./stmService.js";
 
 export interface DocumentRecord {
@@ -86,10 +86,6 @@ const DOCUMENT_IMPORT_PROGRESS = {
   stmComplete: 55,
   mtmStart: 56,
   mtmComplete: 92,
-  graphStart: 93,
-  graphProjected: 95,
-  graphRanked: 97,
-  graphClustered: 99,
   completed: 100,
 } as const;
 
@@ -298,7 +294,7 @@ async function processQueuedDocumentImport({ file, documentId, jobId, documentMe
     let lastPromotionProgress: number = DOCUMENT_IMPORT_PROGRESS.mtmStart;
     let lastPromotionEventPercent = -1;
     for (let index = 0; index < interactionIds.length; index += 1) {
-      await consolidateToMTM(interactionIds[index], insertedChunks[index].contentText);
+      await consolidateToMTM(interactionIds[index], insertedChunks[index].contentText, "document");
 
       const completedChunks = index + 1;
       const progress = interpolateProgress(
@@ -340,57 +336,6 @@ async function processQueuedDocumentImport({ file, documentId, jobId, documentMe
         promotedChunks: interactionIds.length,
       },
     });
-
-    currentStage = "refreshing_graph";
-    await markJobRunning(jobId, currentStage, DOCUMENT_IMPORT_PROGRESS.graphStart);
-    await recordPipelineEvent({
-      jobId,
-      documentId,
-      stage: currentStage,
-      message: "Refreshing MTM graph analytics",
-      payload: {
-        progress: DOCUMENT_IMPORT_PROGRESS.graphStart,
-      },
-    });
-    try {
-      await refreshMtmGraphAnalytics({
-        onStep: async (step) => {
-          const progress = mapGraphRefreshProgress(step);
-          await markJobRunning(jobId, currentStage, progress);
-          await recordPipelineEvent({
-            jobId,
-            documentId,
-            stage: currentStage,
-            message: getGraphRefreshMessage(step),
-            payload: {
-              progress,
-              step,
-            },
-          });
-        },
-      });
-      await recordPipelineEvent({
-        jobId,
-        documentId,
-        stage: currentStage,
-        message: "Recomputed MTM PageRank and communities across the full graph",
-        payload: {
-          progress: DOCUMENT_IMPORT_PROGRESS.graphClustered,
-          promotedChunks: interactionIds.length,
-        },
-      });
-    } catch (error) {
-      await recordPipelineEvent({
-        jobId,
-        documentId,
-        stage: currentStage,
-        level: "warning",
-        message: "MTM graph analytics refresh failed after promotion",
-        payload: {
-          error: error instanceof Error ? error.message : String(error),
-        },
-      });
-    }
 
     await db
       .update(documents)
@@ -452,28 +397,6 @@ function interpolateProgress(start: number, end: number, completedUnits: number,
 
   const ratio = Math.min(1, Math.max(0, completedUnits / totalUnits));
   return Math.round(start + (end - start) * ratio);
-}
-
-function mapGraphRefreshProgress(step: RefreshMtmGraphAnalyticsStep) {
-  switch (step) {
-    case "projected":
-      return DOCUMENT_IMPORT_PROGRESS.graphProjected;
-    case "ranked":
-      return DOCUMENT_IMPORT_PROGRESS.graphRanked;
-    case "clustered":
-      return DOCUMENT_IMPORT_PROGRESS.graphClustered;
-  }
-}
-
-function getGraphRefreshMessage(step: RefreshMtmGraphAnalyticsStep) {
-  switch (step) {
-    case "projected":
-      return "Projected the MTM graph for analytics";
-    case "ranked":
-      return "Updated MTM PageRank scores";
-    case "clustered":
-      return "Updated MTM community assignments";
-  }
 }
 
 async function hydrateDocuments(rows: Array<typeof documents.$inferSelect>): Promise<DocumentRecord[]> {

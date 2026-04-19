@@ -148,8 +148,8 @@ export interface TopicNodeRecord {
 }
 
 export interface MentionsEdge {
-  source: string;
-  target: string;
+  chunkId: string;
+  topicId: string;
   confidence: number;
   mentionCount: number;
   relationshipType: string;
@@ -158,25 +158,18 @@ export interface MentionsEdge {
 export interface GraphSnapshot {
   nodes: Array<{
     nodeId: string;
-    type: "chunk" | "episodic";
+    memoryType: "document" | "chat";
     content: string;
     displayLabel: string;
     consolidatedAt: string;
     pageRank?: number;
     communityId?: number;
-    semanticEntityCount: number;
-    semanticMaxConfidence: number;
-    semanticEntities: GraphSemanticEntity[];
   }>;
   edges: Array<{
     source: string;
     target: string;
     weight: number;
-    type: "SIMILAR_TO";
-    cosineWeight: number;
-    semanticOverlapWeight: number;
-    sharedEntityCount: number;
-    sharedEntities: GraphSharedSemanticEntity[];
+    type: "SIMILARITY";
     updatedAt?: string;
   }>;
   topicNodes: TopicNodeRecord[];
@@ -185,10 +178,9 @@ export interface GraphSnapshot {
     nodeCount: number;
     edgeCount: number;
     communityCount: number;
-    episodicNodeCount: number;
-    annotatedNodeCount: number;
+    documentNodeCount: number;
+    chatNodeCount: number;
     similarityEdgeCount: number;
-    overlapEdgeCount: number;
     topicNodeCount: number;
     mentionEdgeCount: number;
   };
@@ -212,10 +204,9 @@ export interface OverviewMetrics {
     nodeCount: number;
     edgeCount: number;
     communityCount: number;
-    episodicNodeCount?: number;
-    annotatedNodeCount?: number;
+    documentNodeCount?: number;
+    chatNodeCount?: number;
     similarityEdgeCount?: number;
-    overlapEdgeCount?: number;
     topicNodeCount?: number;
     mentionEdgeCount?: number;
   };

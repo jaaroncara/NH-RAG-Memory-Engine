@@ -26,7 +26,7 @@ const HISTORY_LIMIT = 24;
 
 const DEFAULT_QUERIES: Record<QueryEngine, string> = {
   sql: `SELECT document_id, filename, import_status, chunk_count\nFROM documents\nORDER BY created_at DESC\nLIMIT 20`,
-  cypher: `MATCH (n:EpisodicNode)\nRETURN n.nodeId AS nodeId, n.content AS content, n.communityId AS communityId\nLIMIT 20`,
+  cypher: `MATCH (n:MemoryNode)\nRETURN n.nodeId AS nodeId, n.memoryType AS memoryType, n.content AS content, n.communityId AS communityId\nLIMIT 20`,
 };
 
 type ConsoleTab = QueryEngine | "history";

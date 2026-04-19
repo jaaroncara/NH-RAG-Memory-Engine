@@ -25,10 +25,6 @@ type RenderLink = SimilarRenderLink | MentionsRenderLink;
 type InspectorNeighbor = GraphSnapshot["nodes"][number] & {
   weight: number;
   edgeType: GraphSnapshot["edges"][number]["type"];
-  cosineWeight: number;
-  semanticOverlapWeight: number;
-  sharedEntityCount: number;
-  sharedEntities: GraphSnapshot["edges"][number]["sharedEntities"];
 };
 
 type TopicMention = {
@@ -237,7 +233,7 @@ export default function MtmGraph({ graph }: MtmGraphProps) {
         })
       );
 
-    // SIMILAR_TO edges rendered first (below MENTIONS arcs)
+    // Memory nodes rendered first (below MENTIONS arcs)
     const similarLinkElements = graphLayer
       .append("g")
       .attr("data-sublayer", "similar-links")
@@ -246,8 +242,7 @@ export default function MtmGraph({ graph }: MtmGraphProps) {
       .enter()
       .append("line")
       .attr("stroke", (datum) => getBaseLinkStroke(datum))
-      .attr("stroke-opacity", (datum) => (datum.type === "SIMILAR_TO" ? 1 : 0.92))
-      .attr("stroke-dasharray", (datum) => getLinkDashArray(datum) ?? null)
+      .attr("stroke-opacity", 1)
       .attr("stroke-width", (datum) => getLinkWidth(datum));
 
     // MENTIONS arcs with arrowheads
@@ -331,8 +326,8 @@ export default function MtmGraph({ graph }: MtmGraphProps) {
     node
       .filter((d): d is ChunkRenderNode => d.nodeKind === "chunk")
       .append("text")
-      .text((datum) => truncateContent(datum.displayLabel, datum.type === "semantic" ? 20 : 26))
-      .attr("font-size", (datum) => (datum.type === "semantic" ? 9 : 10))
+      .text((datum) => truncateContent(datum.displayLabel, 26))
+      .attr("font-size", 10)
       .attr("fill", "#f8fafc")
       .attr("text-anchor", "middle")
       .attr("dy", 3)
@@ -384,7 +379,7 @@ export default function MtmGraph({ graph }: MtmGraphProps) {
             typeof datum.target === "string" ? datum.target : (datum.target as RenderNode).nodeId;
 
           if (datum.edgeKind === "similar") {
-            // Chunk selected: highlight SIMILAR_TO neighbors (unchanged behavior)
+            // Memory node selected: highlight SIMILARITY neighbors
             if (selectedIsChunk && (sourceId === selectedNodeId || targetId === selectedNodeId)) {
               connectedNodeIds.add(sourceId);
               connectedNodeIds.add(targetId);
@@ -412,10 +407,9 @@ export default function MtmGraph({ graph }: MtmGraphProps) {
           return selectedSimilarLinks.has(datum) ? getHighlightedLinkStroke(datum) : "rgba(148, 163, 184, 0.12)";
         })
         .attr("stroke-opacity", (datum) => {
-          if (!selectedNodeId) return datum.type === "SIMILAR_TO" ? 1 : 0.92;
+          if (!selectedNodeId) return 1;
           return selectedSimilarLinks.has(datum) ? 1 : 0.45;
         })
-        .attr("stroke-dasharray", (datum) => getLinkDashArray(datum) ?? null)
         .attr("stroke-width", (datum) => {
           const baseWidth = getLinkWidth(datum);
           if (!selectedNodeId) return baseWidth;
@@ -446,7 +440,7 @@ export default function MtmGraph({ graph }: MtmGraphProps) {
           }
           if (selectedNodeId && connectedNodeIds.has(datum.nodeId)) {
             if (isTopicNode(datum)) return "rgba(167, 243, 208, 0.85)";
-            return datum.type === "semantic" ? "rgba(250, 204, 21, 0.85)" : "rgba(125, 211, 252, 0.75)";
+            return datum.memoryType === "document" ? "rgba(250, 204, 21, 0.85)" : "rgba(125, 211, 252, 0.75)";
           }
           return isTopicNode(datum) ? "rgba(255,255,255,0.35)" : getNodeStroke(datum);
         })
@@ -581,10 +575,10 @@ export default function MtmGraph({ graph }: MtmGraphProps) {
       </div>
 
       <div className="pointer-events-none absolute left-4 top-16 z-10 flex max-w-[70%] flex-wrap gap-2">
-        <LegendPill label="Episodic / Chunk Nodes" className="border-sky-300/30 bg-sky-400/10 text-sky-100" />
+        <LegendPill label="Document Memory" className="border-sky-300/30 bg-sky-400/10 text-sky-100" />
+        <LegendPill label="Chat Memory" className="border-indigo-300/30 bg-indigo-400/10 text-indigo-100" />
         <LegendPill label="Topic Nodes" className="border-violet-300/30 bg-violet-400/10 text-violet-100" />
         <LegendPill label="Similarity Edges" className="border-sky-300/20 bg-sky-500/10 text-sky-100" />
-        <LegendPill label="Overlap-Enriched Edges" className="border-amber-300/20 bg-amber-500/10 text-amber-100" />
         <LegendPill label="Mentions Arcs" className="border-emerald-300/20 bg-emerald-500/10 text-emerald-100" />
       </div>
 
@@ -711,13 +705,10 @@ function ChunkInspectorPanel({
       <div className="rounded-[16px] border border-white/10 bg-white/[0.04] p-3">
         <div className="flex flex-wrap items-center gap-2">
           <span className="rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1 text-[11px] uppercase tracking-[0.22em] text-neutral-300">
-            {node.type}
+            {node.memoryType === "document" ? "Document Memory" : "Chat Memory"}
           </span>
           <span className="rounded-full border border-white/10 bg-white/[0.05] px-2.5 py-1 text-[11px] uppercase tracking-[0.22em] text-neutral-300">
             Community {node.communityId ?? "-"}
-          </span>
-          <span className="rounded-full border border-amber-300/20 bg-amber-500/10 px-2.5 py-1 text-[11px] uppercase tracking-[0.22em] text-amber-100">
-            {node.semanticEntityCount} anchors
           </span>
         </div>
         <p className="mt-3 break-all font-mono text-[11px] text-neutral-500">{node.nodeId}</p>
@@ -728,40 +719,12 @@ function ChunkInspectorPanel({
         <MetricPill label="PageRank" value={formatDecimal(node.pageRank ?? 0, 3)} />
         <MetricPill label="Connections" value={String(node.degree)} />
         <MetricPill label="Weighted Degree" value={formatDecimal(node.weightedDegree, 2)} />
-        <MetricPill label="Anchors" value={String(node.semanticEntityCount)} />
         <MetricPill label="Consolidated" value={formatTimestamp(node.consolidatedAt)} />
       </div>
 
       <div>
-        <p className="text-[11px] uppercase tracking-[0.24em] text-neutral-500">Extracted Semantic Anchors</p>
-        {node.semanticEntities.length > 0 ? (
-          <div className="mt-2 space-y-2">
-            {node.semanticEntities.slice(0, 6).map((entity) => (
-              <div
-                key={`${node.nodeId}:${entity.entityId}`}
-                className="rounded-[14px] border border-white/10 bg-white/[0.04] px-3 py-2.5"
-              >
-                <div className="flex flex-wrap items-center gap-2">
-                  <p className="text-sm text-neutral-100">{entity.canonicalName}</p>
-                  <span className="rounded-full border border-amber-300/20 bg-amber-500/10 px-2 py-0.5 text-[10px] uppercase tracking-[0.22em] text-amber-100">
-                    {entity.entityType}
-                  </span>
-                  <span className="rounded-full border border-white/10 bg-black/35 px-2 py-0.5 text-[10px] uppercase tracking-[0.22em] text-neutral-300">
-                    {formatEdgeType(entity.relationshipType)}
-                  </span>
-                </div>
-                <p className="mt-1 text-[11px] text-neutral-500">
-                  Confidence {formatDecimal(entity.confidence, 2)}
-                </p>
-                {entity.relationshipHint ? (
-                  <p className="mt-1 text-[11px] leading-5 text-neutral-500">{entity.relationshipHint}</p>
-                ) : null}
-              </div>
-            ))}
-          </div>
-        ) : (
-          <p className="mt-2 text-sm text-neutral-500">No extracted semantic anchors were stored on this episodic node.</p>
-        )}
+        <p className="text-[11px] uppercase tracking-[0.24em] text-neutral-500">Semantic Anchors</p>
+        <p className="mt-2 text-sm text-neutral-500">Entity anchors are visible as TopicNodes connected via MENTIONS edges in the graph.</p>
       </div>
 
       <div>
@@ -783,13 +746,8 @@ function ChunkInspectorPanel({
                     </span>
                   </div>
                   <p className="mt-1 font-mono text-[11px] text-neutral-500">{truncateContent(neighbor.nodeId, 28)}</p>
-                  {neighbor.sharedEntityCount > 0 ? (
-                    <p className="mt-1 text-[11px] leading-5 text-neutral-500">
-                      Shared anchors: {neighbor.sharedEntities.slice(0, 4).map((entity) => entity.canonicalName).join(", ")}
-                    </p>
-                  ) : null}
                   <p className="mt-1 text-[11px] leading-5 text-neutral-500">
-                    Cosine {formatDecimal(neighbor.cosineWeight, 2)} • Semantic overlap {formatDecimal(neighbor.semanticOverlapWeight, 2)}
+                    Cosine similarity {formatDecimal(neighbor.weight, 2)}
                   </p>
                 </div>
                 <span className="rounded-full border border-white/10 bg-black/35 px-2 py-1 font-mono text-[11px] text-neutral-300">
@@ -881,19 +839,11 @@ function buildNodeInspectorData(graph: GraphSnapshot): Map<string, InspectorNode
       ...targetNode,
       weight: edge.weight,
       edgeType: edge.type,
-      cosineWeight: edge.cosineWeight,
-      semanticOverlapWeight: edge.semanticOverlapWeight,
-      sharedEntityCount: edge.sharedEntityCount,
-      sharedEntities: edge.sharedEntities,
     });
     target.neighbors.push({
       ...sourceNode,
       weight: edge.weight,
       edgeType: edge.type,
-      cosineWeight: edge.cosineWeight,
-      semanticOverlapWeight: edge.semanticOverlapWeight,
-      sharedEntityCount: edge.sharedEntityCount,
-      sharedEntities: edge.sharedEntities,
     });
   });
 
@@ -1019,7 +969,7 @@ function calculateFitTransform(nodes: RenderNode[], width: number, height: numbe
 
 function createGraphSignature(graph: GraphSnapshot) {
   return [
-    graph.nodes.map((node) => `${node.nodeId}:${node.type}:${node.displayLabel}`).join("|"),
+    graph.nodes.map((node) => `${node.nodeId}:${node.memoryType}:${node.displayLabel}`).join("|"),
     graph.edges.map((edge) => `${edge.source}:${edge.target}:${edge.type}:${edge.weight.toFixed(3)}`).join("|"),
     `tn:${graph.topicNodes.length}`,
     `me:${graph.mentionEdges.length}`,
@@ -1061,20 +1011,20 @@ function getNodeStroke(_node: GraphSnapshot["nodes"][number]) {
   return "rgba(226, 232, 240, 0.28)";
 }
 
-function getBaseLinkStroke(link: GraphSnapshot["edges"][number]) {
-  return link.sharedEntityCount > 0 ? "rgba(251, 191, 36, 0.42)" : "rgba(125, 211, 252, 0.22)";
+function getBaseLinkStroke(_link: GraphSnapshot["edges"][number]) {
+  return "rgba(125, 211, 252, 0.22)";
 }
 
-function getHighlightedLinkStroke(link: GraphSnapshot["edges"][number]) {
-  return link.sharedEntityCount > 0 ? "rgba(251, 191, 36, 0.88)" : "rgba(125, 211, 252, 0.82)";
+function getHighlightedLinkStroke(_link: GraphSnapshot["edges"][number]) {
+  return "rgba(125, 211, 252, 0.82)";
 }
 
 function getLinkWidth(link: GraphSnapshot["edges"][number]) {
-  return 0.8 + link.cosineWeight * 1.5 + link.semanticOverlapWeight * 1.4;
+  return 0.8 + link.weight * 2.0;
 }
 
-function getLinkDashArray(link: GraphSnapshot["edges"][number]) {
-  return link.sharedEntityCount > 0 ? "6 4" : undefined;
+function getLinkDashArray(_link: GraphSnapshot["edges"][number]) {
+  return undefined;
 }
 
 function formatEdgeType(value: string) {

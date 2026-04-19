@@ -7,22 +7,14 @@ const router = Router();
 const consolidateSchema = z.object({
   interactionId: z.string().min(1),
   content: z.string().min(1),
+  memoryType: z.enum(["document", "chat"]).optional().default("chat"),
 });
 
 router.post("/consolidate", async (req, res) => {
   try {
     const body = consolidateSchema.parse(req.body);
-    const id = await consolidateToMTM(body.interactionId, body.content);
-
-    let analyticsRefreshed = true;
-    try {
-      await refreshMtmGraphAnalytics();
-    } catch (error) {
-      analyticsRefreshed = false;
-      console.error("MTM analytics refresh error:", error);
-    }
-
-    res.status(201).json({ nodeId: id, analyticsRefreshed });
+    const id = await consolidateToMTM(body.interactionId, body.content, body.memoryType);
+    res.status(201).json({ nodeId: id });
   } catch (error) {
     if (error instanceof z.ZodError) {
       res.status(400).json({ error: error.issues });
@@ -30,6 +22,16 @@ router.post("/consolidate", async (req, res) => {
     }
     console.error("MTM consolidate error:", error);
     res.status(500).json({ error: "Failed to consolidate to MTM" });
+  }
+});
+
+router.get("/analytics/refresh", async (req, res) => {
+  try {
+    await refreshMtmGraphAnalytics();
+    res.json({ ok: true, refreshedAt: new Date().toISOString() });
+  } catch (error) {
+    console.error("MTM analytics refresh error:", error);
+    res.status(500).json({ error: "Failed to refresh MTM analytics" });
   }
 });
 
