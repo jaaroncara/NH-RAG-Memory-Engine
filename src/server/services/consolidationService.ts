@@ -317,8 +317,11 @@ async function processSleepCycleJob(jobId: string): Promise<void> {
       `CALL gds.graph.project($graphName, $nodeLabels, $relationshipProjection)`,
       {
         graphName: louvainGraphName,
-        nodeLabels: ["MemoryNode"],
-        relationshipProjection: { SIMILARITY: { orientation: "UNDIRECTED", properties: ["weight"] } },
+        nodeLabels: ["MemoryNode", "TopicNode"],
+        relationshipProjection: {
+          SIMILARITY: { orientation: "UNDIRECTED", properties: ["weight"] },
+          MENTIONS: { orientation: "UNDIRECTED", properties: { weight: { property: "confidence", defaultValue: 0.5 } } },
+        },
       }
     );
     louvainGraphProjected = true;

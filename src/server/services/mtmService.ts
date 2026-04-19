@@ -33,6 +33,7 @@ export interface TopicNodeRecord {
   mentionCount: number;
   confidence: number;
   lastMentionedAt: string | null;
+  communityId?: number;
 }
 
 export interface MentionsEdge {
@@ -60,9 +61,10 @@ export interface GraphSnapshot {
   };
 }
 
-const MTM_GRAPH_NODE_LABELS = ["MemoryNode"];
+const MTM_GRAPH_NODE_LABELS = ["MemoryNode", "TopicNode"];
 const MTM_GRAPH_RELATIONSHIP_PROJECTION = {
   SIMILARITY: { orientation: "UNDIRECTED", properties: ["weight"] },
+  MENTIONS: { orientation: "UNDIRECTED", properties: { weight: { property: "confidence", defaultValue: 0.5 } } },
 };
 
 export type RefreshMtmGraphAnalyticsStep = "projected" | "ranked" | "clustered";
@@ -173,24 +175,41 @@ export async function getTopicNodes(limit?: number): Promise<TopicNodeRecord[]> 
   const session = driver.session();
   try {
     const result = await session.run(
-      `MATCH (t:TopicNode) RETURN t ORDER BY t.mentionCount DESC LIMIT $limit`,
+      `MATCH (t:TopicNode)
+       RETURN t.topicId AS topicId,
+              t.entityType AS entityType,
+              t.canonicalName AS canonicalName,
+              coalesce(t.aliases, []) AS aliases,
+              t.mentionCount AS mentionCount,
+              t.confidence AS confidence,
+              t.lastMentionedAt AS lastMentionedAt,
+              t.communityId AS communityId
+       ORDER BY t.mentionCount DESC
+       LIMIT $limit`,
       { limit: neo4j.int(resolvedLimit) }
     );
     return result.records.map((record) => {
-      const props = record.get("t").properties as Record<string, unknown>;
-      const raw = props.mentionCount;
+      const rawMentionCount = record.get("mentionCount");
       const mentionCount =
-        typeof raw === "object" && raw !== null && "toNumber" in raw
-          ? (raw as { toNumber(): number }).toNumber()
-          : Number(raw);
+        typeof rawMentionCount === "object" && rawMentionCount !== null && "toNumber" in rawMentionCount
+          ? (rawMentionCount as { toNumber(): number }).toNumber()
+          : Number(rawMentionCount);
+      const rawCommunityId = record.get("communityId");
+      const communityId =
+        rawCommunityId === null || rawCommunityId === undefined
+          ? undefined
+          : typeof rawCommunityId === "object" && "toNumber" in rawCommunityId
+          ? (rawCommunityId as { toNumber(): number }).toNumber()
+          : Number(rawCommunityId);
       return {
-        topicId: props.topicId as string,
-        entityType: props.entityType as string,
-        canonicalName: props.canonicalName as string,
-        aliases: (props.aliases as string[]) ?? [],
+        topicId: record.get("topicId") as string,
+        entityType: record.get("entityType") as string,
+        canonicalName: record.get("canonicalName") as string,
+        aliases: (record.get("aliases") as string[]) ?? [],
         mentionCount,
-        confidence: Number(props.confidence),
-        lastMentionedAt: (props.lastMentionedAt as string | null) ?? null,
+        confidence: Number(record.get("confidence")),
+        lastMentionedAt: (record.get("lastMentionedAt") as string | null) ?? null,
+        communityId,
       };
     });
   } finally {
@@ -239,8 +258,11 @@ export async function refreshMtmGraphAnalytics(options?: {
 }): Promise<void> {
   const driver = getNeo4jDriver();
   const session = driver.session();
-  const graphName = `nhrag_mtm_refresh_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-  let graphProjected = false;
+  const ts = `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const rankGraphName = `nhrag_mtm_rank_${ts}`;
+  const communityGraphName = `nhrag_mtm_community_${ts}`;
+  let rankProjected = false;
+  let communityProjected = false;
 
   try {
     const countResult = await session.run("MATCH (n:MemoryNode) RETURN count(n) AS cnt");
@@ -249,15 +271,14 @@ export async function refreshMtmGraphAnalytics(options?: {
       return;
     }
 
+    // PageRank: MemoryNode only with SIMILARITY edges
     await session.run(
-      `CALL gds.graph.project($graphName, $nodeLabels, $relationshipProjection)`,
-      {
-        graphName,
-        nodeLabels: MTM_GRAPH_NODE_LABELS,
-        relationshipProjection: MTM_GRAPH_RELATIONSHIP_PROJECTION,
-      }
+      `CALL gds.graph.project($graphName, ["MemoryNode"], {
+        SIMILARITY: { orientation: "UNDIRECTED", properties: ["weight"] }
+      })`,
+      { graphName: rankGraphName }
     );
-    graphProjected = true;
+    rankProjected = true;
     await options?.onStep?.("projected");
 
     await session.run(
@@ -266,9 +287,20 @@ export async function refreshMtmGraphAnalytics(options?: {
         dampingFactor: 0.85,
         writeProperty: 'pageRank'
       })`,
-      { graphName }
+      { graphName: rankGraphName }
     );
     await options?.onStep?.("ranked");
+
+    // Community detection: MemoryNode + TopicNode with SIMILARITY + MENTIONS
+    await session.run(
+      `CALL gds.graph.project($graphName, $nodeLabels, $relationshipProjection)`,
+      {
+        graphName: communityGraphName,
+        nodeLabels: MTM_GRAPH_NODE_LABELS,
+        relationshipProjection: MTM_GRAPH_RELATIONSHIP_PROJECTION,
+      }
+    );
+    communityProjected = true;
 
     try {
       await session.run(
@@ -278,7 +310,7 @@ export async function refreshMtmGraphAnalytics(options?: {
           gamma: 1.0,
           theta: 0.01
         })`,
-        { graphName }
+        { graphName: communityGraphName }
       );
     } catch (error) {
       console.warn("gds.leiden not available, falling back to gds.louvain:", error);
@@ -287,19 +319,25 @@ export async function refreshMtmGraphAnalytics(options?: {
           relationshipWeightProperty: 'weight',
           writeProperty: 'communityId'
         })`,
-        { graphName }
+        { graphName: communityGraphName }
       );
     }
     await options?.onStep?.("clustered");
   } finally {
-    if (graphProjected) {
+    if (rankProjected) {
       try {
-        await session.run(`CALL gds.graph.drop($graphName)`, { graphName });
+        await session.run(`CALL gds.graph.drop($graphName)`, { graphName: rankGraphName });
       } catch (error) {
-        console.error("Failed to drop projected MTM analytics graph:", error);
+        console.error("Failed to drop PageRank projection:", error);
       }
     }
-
+    if (communityProjected) {
+      try {
+        await session.run(`CALL gds.graph.drop($graphName)`, { graphName: communityGraphName });
+      } catch (error) {
+        console.error("Failed to drop community projection:", error);
+      }
+    }
     await session.close();
   }
 }

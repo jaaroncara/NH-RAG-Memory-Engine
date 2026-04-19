@@ -11,7 +11,7 @@ type MentionsEdge = GraphSnapshot["mentionEdges"][number];
 // --- Discriminated union node types ---
 
 type ChunkRenderNode = GraphSnapshot["nodes"][number] & { nodeKind: "chunk" } & d3.SimulationNodeDatum;
-type TopicRenderNode = TopicNodeRecord & { nodeKind: "topic"; nodeId: string; displayLabel: string } & d3.SimulationNodeDatum;
+type TopicRenderNode = TopicNodeRecord & { nodeKind: "topic"; nodeId: string; displayLabel: string; communityId?: number } & d3.SimulationNodeDatum;
 type RenderNode = ChunkRenderNode | TopicRenderNode;
 
 // --- Discriminated union link types ---
@@ -46,6 +46,7 @@ type TopicInspectorNode = TopicNodeRecord & {
   nodeKind: "topic";
   nodeId: string;
   displayLabel: string;
+  communityId?: number;
   degree: number;
   weightedDegree: number;
   mentioningChunkIds: string[];
@@ -305,19 +306,15 @@ export default function MtmGraph({ graph }: MtmGraphProps) {
       .attr("stroke", (datum) => getNodeStroke(datum))
       .attr("stroke-width", 1.5);
 
-    // Topic nodes: diamond (rotated rect centered at origin)
+    // Topic nodes: circle (community-colored, matching MemoryNode convention)
     node
       .filter((d): d is TopicRenderNode => d.nodeKind === "topic")
-      .append("rect")
+      .append("circle")
       .classed("node-shape", true)
-      .attr("width", (datum) => getTopicNodeRadius(datum) * 1.9)
-      .attr("height", (datum) => getTopicNodeRadius(datum) * 1.9)
-      .attr("x", (datum) => -(getTopicNodeRadius(datum) * 1.9) / 2)
-      .attr("y", (datum) => -(getTopicNodeRadius(datum) * 1.9) / 2)
-      .attr("transform", "rotate(45)")
-      .attr("fill", (datum) => entityTypeColor(datum.entityType))
-      .attr("stroke", "rgba(255,255,255,0.35)")
-      .attr("stroke-width", 1.5);
+      .attr("r", (datum) => getTopicNodeRadius(datum))
+      .attr("fill", (datum) => color(String((datum as TopicRenderNode & { communityId?: number }).communityId ?? -1)))
+      .attr("stroke", (datum) => entityTypeColor(datum.entityType))
+      .attr("stroke-width", 2);
 
     // Tooltips
     node.append("title").text((datum) => `${datum.nodeId}\n${datum.displayLabel}`);
@@ -577,7 +574,7 @@ export default function MtmGraph({ graph }: MtmGraphProps) {
       <div className="pointer-events-none absolute left-4 top-16 z-10 flex max-w-[70%] flex-wrap gap-2">
         <LegendPill label="Document Memory" className="border-sky-300/30 bg-sky-400/10 text-sky-100" />
         <LegendPill label="Chat Memory" className="border-indigo-300/30 bg-indigo-400/10 text-indigo-100" />
-        <LegendPill label="Topic Nodes" className="border-violet-300/30 bg-violet-400/10 text-violet-100" />
+        <LegendPill label="Topic Nodes (ring = entity type)" className="border-white/20 bg-white/5 text-neutral-300" />
         <LegendPill label="Similarity Edges" className="border-sky-300/20 bg-sky-500/10 text-sky-100" />
         <LegendPill label="Mentions Arcs" className="border-emerald-300/20 bg-emerald-500/10 text-emerald-100" />
       </div>
@@ -665,6 +662,7 @@ function TopicInspectorPanel({
 
       <div className="grid grid-cols-2 gap-2 text-sm text-neutral-300">
         <MetricPill label="Entity Type" value={node.entityType} />
+        <MetricPill label="Community" value={node.communityId !== undefined && node.communityId !== -1 ? String(node.communityId) : "—"} />
         <MetricPill label="Mention Count" value={String(node.mentionCount)} />
         <MetricPill label="Confidence" value={formatDecimal(node.confidence, 2)} />
         <MetricPill label="Last Mentioned" value={formatTimestamp(node.lastMentionedAt)} />
@@ -995,7 +993,8 @@ function truncateContent(value: string, maxLength: number) {
   return `${value.slice(0, maxLength)}…`;
 }
 
-function formatTimestamp(value: string) {
+function formatTimestamp(value: string | null) {
+  if (!value) return "—";
   return new Date(value).toLocaleString();
 }
 
