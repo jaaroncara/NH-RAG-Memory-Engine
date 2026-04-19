@@ -1,3 +1,4 @@
+import neo4j from "neo4j-driver";
 import { getNeo4jDriver } from "../db/neo4j.js";
 import { getProvider } from "../providers/index.js";
 import { storeFact, condenseLtmFacts } from "./ltmService.js";
@@ -143,7 +144,7 @@ async function processSleepCycleJob(jobId: string): Promise<void> {
     await session.run(
       `CALL gds.graph.project($graphName,
          { MemoryNode: { properties: ['embedding'] } },
-         {}
+         '*'
        )`,
       { graphName: knnGraphName }
     );
@@ -162,7 +163,7 @@ async function processSleepCycleJob(jobId: string): Promise<void> {
          concurrency:           4
        })
        YIELD nodesCompared, relationshipsWritten`,
-      { graphName: knnGraphName, topK: KNN_TOP_K, cutoff: KNN_SIMILARITY_CUTOFF }
+      { graphName: knnGraphName, topK: neo4j.int(KNN_TOP_K), cutoff: KNN_SIMILARITY_CUTOFF }
     );
     const nodesCompared       = knnResult.records[0].get("nodesCompared").toNumber();
     const relationshipsWritten = knnResult.records[0].get("relationshipsWritten").toNumber();
