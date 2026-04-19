@@ -16,6 +16,7 @@ import {
   Orbit,
   RefreshCw,
   ServerCog,
+  SlidersHorizontal,
   Sparkles,
 } from "lucide-react";
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
@@ -30,6 +31,13 @@ import { MemoryService, type DocumentDetail, type DocumentImportStatusSummary, t
 import MtmGraph from "./MtmGraph";
 import QueryConsoleView from "./QueryConsoleView";
 
+interface PruningConfig {
+  stmMaxAgeHours: number;
+  stmMaxRowsPerSession: number;
+  ltmDormancyDays: number;
+  ltmSimilarityThreshold: number;
+}
+
 const navItems = [
   { to: "/", label: "Overview", icon: Activity },
   { to: "/documents", label: "Document Loader", icon: HardDriveUpload },
@@ -37,6 +45,7 @@ const navItems = [
   { to: "/stm", label: "STM Base", icon: Database },
   { to: "/mtm", label: "MTM Network", icon: Orbit },
   { to: "/ltm", label: "LTM Store", icon: Sparkles },
+  { to: "/pruning", label: "Memory Config", icon: SlidersHorizontal },
   { to: "/console", label: "Data Console", icon: ServerCog },
   { to: "/jobs", label: "Logs", icon: GitBranch },
 ];
@@ -63,7 +72,9 @@ const sleepCycleSteps = [
   { key: "project_graph", label: "Project Graph", stages: ["project_graph"] },
   { key: "rank_cluster", label: "Score & Cluster", stages: ["rank_nodes", "cluster_communities"] },
   { key: "distill_facts", label: "Distill to LTM", stages: ["distill_facts"] },
-  { key: "cleanup", label: "Cleanup", stages: ["cleanup", "completed"] },
+  { key: "cleanup", label: "Cleanup", stages: ["cleanup"] },
+  { key: "stm_prune", label: "Prune STM", stages: ["stm_prune"] },
+  { key: "ltm_condense", label: "Condense LTM", stages: ["ltm_condense", "completed"] },
 ] as const;
 
 const STM_PAGE_SIZE = 20;
@@ -75,6 +86,8 @@ const sleepCycleStageLabels: Record<string, string> = {
   cluster_communities: "Clustering MTM communities",
   distill_facts: "Committing MTM to LTM",
   cleanup: "Pruning nodes and closing the graph",
+  stm_prune: "Pruning Short-Term Memory",
+  ltm_condense: "Condensing Long-Term Memory facts",
   completed: "Sleep cycle completed",
   failed: "Sleep cycle failed",
 };
@@ -364,6 +377,8 @@ export default function DatabaseConsole() {
   const [graph, setGraph] = useState<GraphSnapshot>({
     nodes: [],
     edges: [],
+    topicNodes: [],
+    mentionEdges: [],
     stats: {
       nodeCount: 0,
       edgeCount: 0,
@@ -372,6 +387,8 @@ export default function DatabaseConsole() {
       annotatedNodeCount: 0,
       similarityEdgeCount: 0,
       overlapEdgeCount: 0,
+      topicNodeCount: 0,
+      mentionEdgeCount: 0,
     },
   });
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
@@ -684,8 +701,6 @@ export default function DatabaseConsole() {
             </div>
           </div>
 
-          {latestSleepCycleJob ? <SleepCycleStatusCard job={latestSleepCycleJob} event={latestSleepCycleEvent} /> : null}
-
           <Routes>
             <Route
               path="/"
@@ -730,6 +745,7 @@ export default function DatabaseConsole() {
             />
             <Route path="/mtm" element={<MtmView graph={graph} />} />
             <Route path="/ltm" element={<LtmView ltm={ltm} page={ltmPage} pageSize={LTM_PAGE_SIZE} refreshLtm={refreshLtm} />} />
+            <Route path="/pruning" element={<PruningConfigView latestSleepCycleJob={latestSleepCycleJob} latestSleepCycleEvent={latestSleepCycleEvent} />} />
             <Route path="/jobs" element={<JobsView jobs={jobs} events={events} />} />
             <Route path="/conversations" element={<ConversationHookView />} />
           </Routes>
@@ -1194,7 +1210,7 @@ function SleepCycleStatusCard({ job, event }: { job: JobRecord; event: PipelineE
 
       {isExpanded ? (
         <div className="mt-4 space-y-4">
-          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+          <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-6">
             {sleepCycleSteps.map((step) => {
               const stepState = getSleepCycleStepState(job, step.key);
 
@@ -1376,12 +1392,14 @@ function StmView({
 function MtmView({ graph }: { graph: GraphSnapshot }) {
   return (
     <div className="space-y-6">
-      <div className="grid gap-4 md:grid-cols-5">
+      <div className="grid gap-4 grid-cols-2 md:grid-cols-4 xl:grid-cols-7">
         {[
           { label: "Nodes", value: graph.stats.nodeCount },
           { label: "Annotated Nodes", value: graph.stats.annotatedNodeCount },
-          { label: "Edges", value: graph.stats.edgeCount },
+          { label: "Similarity Edges", value: graph.stats.similarityEdgeCount },
           { label: "Overlap Edges", value: graph.stats.overlapEdgeCount },
+          { label: "Topic Nodes", value: graph.stats.topicNodeCount },
+          { label: "Mention Edges", value: graph.stats.mentionEdgeCount },
           { label: "Communities", value: graph.stats.communityCount },
         ].map((card) => (
           <Card key={card.label} className="border-white/10 bg-white/[0.04] text-neutral-100 shadow-none">
@@ -1395,7 +1413,7 @@ function MtmView({ graph }: { graph: GraphSnapshot }) {
       <Card className="border-white/10 bg-white/[0.04] text-neutral-100 shadow-none">
         <CardHeader>
           <CardTitle>Medium-Term Memory Network</CardTitle>
-          <CardDescription className="text-neutral-400">A bounded episodic graph enriched by extracted semantic attributes on nodes and shared semantic overlap on similarity edges. The graph can be panned, zoomed, and expanded into fullscreen for inspection.</CardDescription>
+          <CardDescription className="text-neutral-400">A bipartite graph of chunk nodes and topic nodes connected by MENTIONS edges, with SIMILAR_TO similarity edges retained for cosine-overlap fallback. The graph can be panned, zoomed, and expanded into fullscreen for inspection.</CardDescription>
         </CardHeader>
         <CardContent className="pt-0">
           <MtmGraph graph={graph} />
@@ -1456,6 +1474,164 @@ function LtmView({
         />
       </CardContent>
     </Card>
+  );
+}
+
+function PruningConfigView({ latestSleepCycleJob, latestSleepCycleEvent }: { latestSleepCycleJob: JobRecord | null; latestSleepCycleEvent: PipelineEvent | null }) {
+  const [config, setConfig] = useState<PruningConfig | null>(null);
+  const [draft, setDraft] = useState<PruningConfig | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+
+  useEffect(() => {
+    MemoryService.getPruningConfig()
+      .then((cfg) => {
+        setConfig(cfg);
+        setDraft(cfg);
+      })
+      .catch((error) => toast.error(error instanceof Error ? error.message : "Failed to load pruning config"));
+  }, []);
+
+  const handleSave = async () => {
+    if (!draft) return;
+    setIsSaving(true);
+    try {
+      const updated = await MemoryService.updatePruningConfig(draft);
+      setConfig(updated);
+      setDraft(updated);
+      toast.success("Pruning configuration saved");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to save pruning config");
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const isDirty = config && draft && JSON.stringify(config) !== JSON.stringify(draft);
+
+  if (!draft) {
+    return (
+      <div className="grid gap-6 xl:grid-cols-2">
+        {[0, 1].map((i) => (
+          <Card key={i} className="border-white/10 bg-white/[0.04] text-neutral-100 shadow-none">
+            <CardHeader>
+              <div className="h-5 w-40 animate-pulse rounded bg-white/10" />
+              <div className="mt-2 h-4 w-64 animate-pulse rounded bg-white/[0.06]" />
+            </CardHeader>
+            <CardContent className="space-y-6">
+              {[0, 1].map((j) => (
+                <div key={j} className="space-y-2">
+                  <div className="h-3 w-32 animate-pulse rounded bg-white/10" />
+                  <div className="h-10 w-full animate-pulse rounded bg-white/[0.06]" />
+                  <div className="h-3 w-full animate-pulse rounded bg-white/[0.04]" />
+                </div>
+              ))}
+            </CardContent>
+          </Card>
+        ))}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6">
+      {latestSleepCycleJob ? <SleepCycleStatusCard job={latestSleepCycleJob} event={latestSleepCycleEvent} /> : null}
+
+      <div className="grid gap-6 xl:grid-cols-2">
+        {/* STM Pruning */}
+        <Card className="border-white/10 bg-white/[0.04] text-neutral-100 shadow-none">
+          <CardHeader>
+            <CardTitle>STM Pruning</CardTitle>
+            <CardDescription className="text-neutral-400">Controls age-based and count-cap pruning applied to the Short-Term Memory base during the sleep cycle.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            <div>
+              <label className="text-xs uppercase tracking-[0.22em] text-neutral-500">Max Conversation Age (hours)</label>
+              <Input
+                type="number"
+                min={1}
+                max={720}
+                step={1}
+                value={draft.stmMaxAgeHours}
+                onChange={(e) => setDraft({ ...draft, stmMaxAgeHours: Number(e.target.value) })}
+                className={`mt-2 border-white/10 bg-neutral-900/50 text-neutral-100 ${draft.stmMaxAgeHours !== config.stmMaxAgeHours ? "border-zinc-300/40" : ""}`}
+              />
+              <p className="mt-1 text-xs text-neutral-400">Conversation entries older than this are deleted during the sleep cycle. Document chunks are not affected.</p>
+            </div>
+            <div>
+              <label className="text-xs uppercase tracking-[0.22em] text-neutral-500">Max Rows Per Session</label>
+              <Input
+                type="number"
+                min={10}
+                max={5000}
+                step={10}
+                value={draft.stmMaxRowsPerSession}
+                onChange={(e) => setDraft({ ...draft, stmMaxRowsPerSession: Number(e.target.value) })}
+                className={`mt-2 border-white/10 bg-neutral-900/50 text-neutral-100 ${draft.stmMaxRowsPerSession !== config.stmMaxRowsPerSession ? "border-zinc-300/40" : ""}`}
+              />
+              <p className="mt-1 text-xs text-neutral-400">Keeps only the most recent N rows per session. Older entries are pruned first.</p>
+            </div>
+          </CardContent>
+        </Card>
+
+        {/* LTM Condensation */}
+        <Card className="border-white/10 bg-white/[0.04] text-neutral-100 shadow-none">
+          <CardHeader>
+            <CardTitle>LTM Condensation</CardTitle>
+            <CardDescription className="text-neutral-400">Controls dormancy detection and similarity-based merging of Long-Term Memory facts during the sleep cycle.</CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-6">
+            <div>
+              <label className="text-xs uppercase tracking-[0.22em] text-neutral-500">Dormancy Window (days)</label>
+              <Input
+                type="number"
+                min={1}
+                max={365}
+                step={1}
+                value={draft.ltmDormancyDays}
+                onChange={(e) => setDraft({ ...draft, ltmDormancyDays: Number(e.target.value) })}
+                className={`mt-2 border-white/10 bg-neutral-900/50 text-neutral-100 ${draft.ltmDormancyDays !== config.ltmDormancyDays ? "border-zinc-300/40" : ""}`}
+              />
+              <p className="mt-1 text-xs text-neutral-400">Facts that have never been accessed and are older than this are candidates for condensation.</p>
+            </div>
+            <div>
+              <div className="flex items-center justify-between">
+                <label className="text-xs uppercase tracking-[0.22em] text-neutral-500">Similarity Threshold</label>
+                <span className={`font-mono text-sm ${draft.ltmSimilarityThreshold !== config.ltmSimilarityThreshold ? "text-zinc-300" : "text-neutral-300"}`}>
+                  {draft.ltmSimilarityThreshold.toFixed(2)}
+                </span>
+              </div>
+              <input
+                type="range"
+                min={0.50}
+                max={0.99}
+                step={0.01}
+                value={draft.ltmSimilarityThreshold}
+                onChange={(e) => setDraft({ ...draft, ltmSimilarityThreshold: Number(e.target.value) })}
+                className="mt-2 w-full accent-zinc-300"
+              />
+              <p className="mt-1 text-xs text-neutral-400">Dormant facts with cosine similarity above this threshold are merged into a single condensed fact.</p>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      <div className="flex justify-end">
+        <Button
+          className="bg-zinc-300 text-neutral-950 hover:bg-zinc-200"
+          disabled={!isDirty || isSaving}
+          onClick={() => void handleSave()}
+        >
+          {isSaving ? (
+            <>
+              <LoaderCircle className="mr-2 h-4 w-4 animate-spin" />
+              Saving...
+            </>
+          ) : (
+            "Save Changes"
+          )}
+        </Button>
+      </div>
+    </div>
   );
 }
 

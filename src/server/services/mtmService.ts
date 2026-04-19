@@ -83,8 +83,54 @@ const MTM_GRAPH_NODE_LABELS = ["EpisodicNode"];
 const MTM_GRAPH_RELATIONSHIP_PROJECTION = {
   SIMILAR_TO: { orientation: "UNDIRECTED", properties: ["combinedWeight"] },
 };
+const MENTIONS_COVERAGE_THRESHOLD = 0.15;
+
+const BIPARTITE_RELATIONSHIP_QUERY = `
+MATCH (c1:EpisodicNode)-[:MENTIONS]->(t:TopicNode)<-[:MENTIONS]-(c2:EpisodicNode)
+WHERE id(c1) < id(c2)
+WITH c1, c2, count(DISTINCT t) AS intersection
+WHERE intersection > 0
+MATCH (c1)-[:MENTIONS]->(allT1:TopicNode)
+WITH c1, c2, intersection, count(DISTINCT allT1) AS c1Topics
+MATCH (c2)-[:MENTIONS]->(allT2:TopicNode)
+WITH c1, c2, intersection, c1Topics, count(DISTINCT allT2) AS c2Topics
+WHERE (c1Topics + c2Topics - intersection) > 0
+RETURN id(c1) AS source,
+       id(c2) AS target,
+       toFloat(intersection) / (c1Topics + c2Topics - intersection) AS weight
+
+UNION ALL
+
+MATCH (c1:EpisodicNode)-[r:SIMILAR_TO]-(c2:EpisodicNode)
+WHERE id(c1) < id(c2)
+  AND NOT (c1)-[:MENTIONS]->(:TopicNode)<-[:MENTIONS]-(c2)
+RETURN id(c1) AS source,
+       id(c2) AS target,
+       coalesce(r.combinedWeight, r.weight, 0.75) AS weight
+`;
 
 export type RefreshMtmGraphAnalyticsStep = "projected" | "ranked" | "clustered";
+
+async function checkMentionsCoverage(
+  session: Session
+): Promise<{ totalNodes: number; coverage: number }> {
+  const result = await session.run(
+    `MATCH (n:EpisodicNode)
+     WITH count(n) AS totalNodes
+     MATCH (n2:EpisodicNode)-[:MENTIONS]->(:TopicNode)
+     WITH totalNodes, count(DISTINCT n2) AS nodesWithMentions
+     RETURN totalNodes, toFloat(nodesWithMentions) / totalNodes AS coverage`
+  );
+  const record = result.records[0];
+  if (!record) return { totalNodes: 0, coverage: 0 };
+  const rawTotal = record.get("totalNodes");
+  const totalNodes =
+    typeof rawTotal === "object" && rawTotal !== null && "toNumber" in rawTotal
+      ? (rawTotal as { toNumber(): number }).toNumber()
+      : Number(rawTotal);
+  const coverage = Number(record.get("coverage") ?? 0);
+  return { totalNodes, coverage };
+}
 
 export async function consolidateToMTM(
   interactionId: string,
@@ -181,7 +227,7 @@ export async function consolidateToMTM(
       );
     }
 
-    // 2. Build similarity edges with existing nodes (unchanged — required for GDS PageRank/Louvain)
+    // 2. Build similarity edges with existing nodes (retained for GDS PageRank/Louvain fallback)
     const result = await session.run(
       `MATCH (existing:EpisodicNode)
        WHERE existing.nodeId <> $nodeId AND existing.embedding IS NOT NULL
@@ -336,20 +382,35 @@ export async function refreshMtmGraphAnalytics(options?: {
       return;
     }
 
-    await session.run(
-      `CALL gds.graph.project($graphName, $nodeLabels, $relationshipProjection)`,
-      {
-        graphName,
-        nodeLabels: MTM_GRAPH_NODE_LABELS,
-        relationshipProjection: MTM_GRAPH_RELATIONSHIP_PROJECTION,
-      }
-    );
+    const { coverage: mentionsCoverage } = await checkMentionsCoverage(session);
+    const usesBipartiteProjection = mentionsCoverage >= MENTIONS_COVERAGE_THRESHOLD;
+    const weightProperty = usesBipartiteProjection ? "weight" : "combinedWeight";
+
+    if (usesBipartiteProjection) {
+      await session.run(
+        `CALL gds.graph.project($graphName, $nodeQuery, $relationshipQuery)`,
+        {
+          graphName,
+          nodeQuery: "MATCH (n:EpisodicNode) RETURN id(n) AS id",
+          relationshipQuery: BIPARTITE_RELATIONSHIP_QUERY,
+        }
+      );
+    } else {
+      await session.run(
+        `CALL gds.graph.project($graphName, $nodeLabels, $relationshipProjection)`,
+        {
+          graphName,
+          nodeLabels: MTM_GRAPH_NODE_LABELS,
+          relationshipProjection: MTM_GRAPH_RELATIONSHIP_PROJECTION,
+        }
+      );
+    }
     graphProjected = true;
     await options?.onStep?.("projected");
 
     await session.run(
       `CALL gds.pageRank.write($graphName, {
-        relationshipWeightProperty: 'weight',
+        relationshipWeightProperty: '${weightProperty}',
         dampingFactor: 0.85,
         writeProperty: 'pageRank'
       })`,
@@ -357,13 +418,26 @@ export async function refreshMtmGraphAnalytics(options?: {
     );
     await options?.onStep?.("ranked");
 
-    await session.run(
-      `CALL gds.louvain.write($graphName, {
-        relationshipWeightProperty: 'weight',
-        writeProperty: 'communityId'
-      })`,
-      { graphName }
-    );
+    try {
+      await session.run(
+        `CALL gds.leiden.write($graphName, {
+          relationshipWeightProperty: '${weightProperty}',
+          writeProperty: 'communityId',
+          gamma: 1.0,
+          theta: 0.01
+        })`,
+        { graphName }
+      );
+    } catch (error) {
+      console.warn("gds.leiden not available, falling back to gds.louvain:", error);
+      await session.run(
+        `CALL gds.louvain.write($graphName, {
+          relationshipWeightProperty: '${weightProperty}',
+          writeProperty: 'communityId'
+        })`,
+        { graphName }
+      );
+    }
     await options?.onStep?.("clustered");
   } finally {
     if (graphProjected) {
@@ -530,11 +604,15 @@ export async function getGraphSnapshot(limit?: number): Promise<GraphSnapshot> {
       updatedAt: (record.get("updatedAt") as string | null) ?? undefined,
     }));
 
-    // Fetch TopicNodes referenced by the chunk nodes in view
-    const topicNodes = await getTopicNodes(500);
-
-    // Fetch MENTIONS edges for the chunks in view
-    const mentionEdges = await getMentionEdges(episodicNodeIds);
+    // Fetch TopicNodes and MENTIONS edges for the chunks in view.
+    // Filter topicNodes to only those referenced by the returned mentionEdges so
+    // the snapshot contains no disconnected topic bubbles.
+    const [allTopicNodes, mentionEdges] = await Promise.all([
+      getTopicNodes(500),
+      getMentionEdges(episodicNodeIds),
+    ]);
+    const referencedTopicIds = new Set(mentionEdges.map((e) => e.topicId));
+    const topicNodes = allTopicNodes.filter((t) => referencedTopicIds.has(t.topicId));
 
     const stats =
       normalizedLimit === undefined

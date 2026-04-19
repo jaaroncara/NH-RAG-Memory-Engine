@@ -113,16 +113,16 @@ export interface GraphSemanticEntity {
   canonicalName: string;
   aliases: string[];
   relationshipType:
-    | "MENTIONS_PERSON"
-    | "MENTIONS_LOCATION"
-    | "LOCATED_IN"
-    | "REFERENCES_PROJECT"
-    | "WORKS_ON_PROJECT"
-    | "USES_TOOL"
-    | "MENTIONS_TOOL"
-    | "HAS_TOPIC"
-    | "MENTIONS_TOPIC"
-    | "RELATED_TO_ENTITY";
+  | "MENTIONS_PERSON"
+  | "MENTIONS_LOCATION"
+  | "LOCATED_IN"
+  | "REFERENCES_PROJECT"
+  | "WORKS_ON_PROJECT"
+  | "USES_TOOL"
+  | "MENTIONS_TOOL"
+  | "HAS_TOPIC"
+  | "MENTIONS_TOPIC"
+  | "RELATED_TO_ENTITY";
   relationshipHint: string | null;
   confidence: number;
   mentionCount: number;
@@ -137,10 +137,28 @@ export interface GraphSharedSemanticEntity {
   relationshipHints: string[];
 }
 
+export interface TopicNodeRecord {
+  topicId: string;
+  entityType: string;
+  canonicalName: string;
+  aliases: string[];
+  mentionCount: number;
+  confidence: number;
+  lastMentionedAt: string | null;
+}
+
+export interface MentionsEdge {
+  source: string;
+  target: string;
+  confidence: number;
+  mentionCount: number;
+  relationshipType: string;
+}
+
 export interface GraphSnapshot {
   nodes: Array<{
     nodeId: string;
-    type: "episodic";
+    type: "chunk" | "episodic";
     content: string;
     displayLabel: string;
     consolidatedAt: string;
@@ -161,6 +179,8 @@ export interface GraphSnapshot {
     sharedEntities: GraphSharedSemanticEntity[];
     updatedAt?: string;
   }>;
+  topicNodes: TopicNodeRecord[];
+  mentionEdges: MentionsEdge[];
   stats: {
     nodeCount: number;
     edgeCount: number;
@@ -169,6 +189,8 @@ export interface GraphSnapshot {
     annotatedNodeCount: number;
     similarityEdgeCount: number;
     overlapEdgeCount: number;
+    topicNodeCount: number;
+    mentionEdgeCount: number;
   };
 }
 
@@ -194,10 +216,19 @@ export interface OverviewMetrics {
     annotatedNodeCount?: number;
     similarityEdgeCount?: number;
     overlapEdgeCount?: number;
+    topicNodeCount?: number;
+    mentionEdgeCount?: number;
   };
 }
 
 export type QueryEngine = "sql" | "cypher";
+
+export interface PruningConfig {
+  stmMaxAgeHours: number;
+  stmMaxRowsPerSession: number;
+  ltmDormancyDays: number;
+  ltmSimilarityThreshold: number;
+}
 
 export interface QueryInspectionResult {
   engine: QueryEngine;
@@ -372,5 +403,19 @@ export class MemoryService {
   static async testConnection(): Promise<{ status: string; services: Record<string, string> }> {
     const res = await fetch(`${API}/health`);
     return json<{ status: string; services: Record<string, string> }>(res);
+  }
+
+  static async getPruningConfig(): Promise<PruningConfig> {
+    const res = await fetch(`${API}/pruning`);
+    return json<PruningConfig>(res);
+  }
+
+  static async updatePruningConfig(updates: Partial<PruningConfig>): Promise<PruningConfig> {
+    const res = await fetch(`${API}/pruning`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(updates),
+    });
+    return json<PruningConfig>(res);
   }
 }
