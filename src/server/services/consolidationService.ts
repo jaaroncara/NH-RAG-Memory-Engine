@@ -3,6 +3,7 @@ import { getNeo4jDriver } from "../db/neo4j.js";
 import { getProvider } from "../providers/index.js";
 import { storeFact, condenseLtmFacts } from "./ltmService.js";
 import { pruneStm } from "./stmService.js";
+import { pruneStaleTopicNodes } from "./mtmService.js";
 import { createJob, markJobCompleted, markJobFailed, markJobRunning, recordPipelineEvent } from "./jobService.js";
 import { CONCEPT_HIERARCHY } from "../ontology/conceptHierarchy.js";
 import { getPruningConfig } from "../config/pruningConfig.js";
@@ -70,7 +71,8 @@ const SLEEP_CYCLE_PROGRESS = {
   clusterCommunities:  55,
   distillStart:        62,
   distillComplete:     92,
-  cleanup:             97,
+  cleanup:             96,
+  topicPrune:          97,
   stmPrune:            98,
   ltmCondense:         99,
   completed:          100,
@@ -548,7 +550,31 @@ async function processSleepCycleJob(jobId: string): Promise<void> {
     });
 
     // ------------------------------------------------------------------
-    // Step 16. STM Pruning
+    // Step 16. Topic Node Pruning
+    // ------------------------------------------------------------------
+    let topicPruneStats = { deleted: 0 };
+    try {
+      await markJobRunning(jobId, "topic_prune", SLEEP_CYCLE_PROGRESS.topicPrune);
+      topicPruneStats = await pruneStaleTopicNodes({ minMentionCount: 2, maxAgeDays: 30 });
+      await recordPipelineEvent({
+        jobId,
+        stage: "topic_prune",
+        message: `Topic pruning: ${topicPruneStats.deleted} stale TopicNodes removed (mentionCount < 2 and not mentioned in 30 days)`,
+        payload: { progress: SLEEP_CYCLE_PROGRESS.topicPrune, ...topicPruneStats },
+      });
+    } catch (topicPruneError) {
+      console.error("[consolidationService] Topic pruning failed:", topicPruneError);
+      await recordPipelineEvent({
+        jobId,
+        stage: "topic_prune",
+        level: "error",
+        message: "Topic pruning failed — sleep cycle will still complete",
+        payload: { error: topicPruneError instanceof Error ? topicPruneError.message : String(topicPruneError) },
+      });
+    }
+
+    // ------------------------------------------------------------------
+    // Step 17. STM Pruning
     // ------------------------------------------------------------------
     let stmStats = { deletedByAge: 0, deletedByCount: 0 };
     try {
@@ -573,7 +599,7 @@ async function processSleepCycleJob(jobId: string): Promise<void> {
     }
 
     // ------------------------------------------------------------------
-    // Step 17. LTM Condensation
+    // Step 18. LTM Condensation
     // ------------------------------------------------------------------
     let ltmStats = { clustersFound: 0, factsCondensed: 0, newFactsCreated: 0 };
     try {
@@ -608,6 +634,7 @@ async function processSleepCycleJob(jobId: string): Promise<void> {
         progress: SLEEP_CYCLE_PROGRESS.completed,
         pruned: nodesToPrune.length,
         consolidated: consolidatedCount,
+        topicNodesDeleted: topicPruneStats.deleted,
         stmDeletedByAge: stmStats.deletedByAge,
         stmDeletedByCount: stmStats.deletedByCount,
         ltmClustersCondensed: ltmStats.clustersFound,

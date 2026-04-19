@@ -158,6 +158,37 @@ export async function consolidateToMTM(
   }
 }
 
+export async function pruneStaleTopicNodes(options?: {
+  minMentionCount?: number;
+  maxAgeDays?: number;
+}): Promise<{ deleted: number }> {
+  const minMentionCount = options?.minMentionCount ?? 2;
+  const maxAgeDays = options?.maxAgeDays ?? 30;
+  const cutoff = new Date(Date.now() - maxAgeDays * 24 * 60 * 60 * 1000).toISOString();
+
+  const driver = getNeo4jDriver();
+  const session = driver.session();
+  try {
+    const result = await session.run(
+      `MATCH (t:TopicNode)
+       WHERE t.lastMentionedAt < $cutoff AND t.mentionCount < $minMentionCount
+       WITH count(t) AS cnt, collect(t) AS stale
+       FOREACH (t IN stale | DETACH DELETE t)
+       RETURN cnt`,
+      { cutoff, minMentionCount }
+    );
+    const deleted = result.records[0]?.get("cnt");
+    return {
+      deleted:
+        typeof deleted === "object" && deleted !== null && "toNumber" in deleted
+          ? (deleted as { toNumber(): number }).toNumber()
+          : Number(deleted ?? 0),
+    };
+  } finally {
+    await session.close();
+  }
+}
+
 export async function getMtmCount(): Promise<number> {
   const driver = getNeo4jDriver();
   const session = driver.session();

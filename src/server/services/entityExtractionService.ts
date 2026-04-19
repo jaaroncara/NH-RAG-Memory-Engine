@@ -2,6 +2,8 @@ import { z } from "zod";
 
 import { getProvider } from "../providers/index.js";
 
+const MIN_ENTITY_CONFIDENCE = 0.75;
+
 const semanticEntityTypeSchema = z.enum([
   "person",
   "location",
@@ -23,7 +25,7 @@ const rawExtractionSchema = z.object({
         evidence: z.string().trim().min(1).max(240).optional().nullable(),
       })
     )
-    .max(16)
+    .max(8)
     .default([]),
 });
 
@@ -120,7 +122,7 @@ export async function extractSemanticEntities(content: string): Promise<Extracte
         evidence: normalizeOptionalText(entity.evidence),
       } satisfies ExtractedEntity;
     })
-  );
+  ).filter((entity) => entity.confidence >= MIN_ENTITY_CONFIDENCE);
 }
 
 function buildExtractionPrompt(content: string) {
