@@ -61,10 +61,9 @@ export interface GraphSnapshot {
   };
 }
 
-const MTM_GRAPH_NODE_LABELS = ["MemoryNode", "TopicNode"];
+const MTM_GRAPH_NODE_LABELS = ["MemoryNode"];
 const MTM_GRAPH_RELATIONSHIP_PROJECTION = {
   SIMILARITY: { orientation: "UNDIRECTED", properties: ["weight"] },
-  MENTIONS: { orientation: "UNDIRECTED", properties: { weight: { property: "confidence", defaultValue: 0.5 } } },
 };
 
 export type RefreshMtmGraphAnalyticsStep = "projected" | "ranked" | "clustered";
@@ -338,8 +337,8 @@ export async function refreshMtmGraphAnalytics(options?: {
         `CALL gds.leiden.write($graphName, {
           relationshipWeightProperty: 'weight',
           writeProperty: 'communityId',
-          gamma: 1.0,
-          theta: 0.01
+          gamma: 2.0,
+          theta: 0.1
         })`,
         { graphName: communityGraphName }
       );
@@ -348,7 +347,10 @@ export async function refreshMtmGraphAnalytics(options?: {
       await session.run(
         `CALL gds.louvain.write($graphName, {
           relationshipWeightProperty: 'weight',
-          writeProperty: 'communityId'
+          writeProperty: 'communityId',
+          tolerance: 0.0001,
+          maxIterations: 20,
+          resolution: 2.0
         })`,
         { graphName: communityGraphName }
       );

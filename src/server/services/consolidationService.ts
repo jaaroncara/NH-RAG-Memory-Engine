@@ -13,8 +13,8 @@ const MIN_COMMUNITY_SIZE = 2;
 const MIN_NODES_FOR_PRUNING = 8;
 const MAX_PRUNE_FRACTION = 0.20;
 const MIN_SCORE_VARIANCE_RATIO = 0.05;
-const KNN_SIMILARITY_CUTOFF = 0.82;
-const KNN_TOP_K = 10;
+const KNN_SIMILARITY_CUTOFF = 0.72;
+const KNN_TOP_K = 15;
 
 interface PageRankScore {
   graphNodeId: string;
@@ -319,10 +319,9 @@ async function processSleepCycleJob(jobId: string): Promise<void> {
       `CALL gds.graph.project($graphName, $nodeLabels, $relationshipProjection)`,
       {
         graphName: louvainGraphName,
-        nodeLabels: ["MemoryNode", "TopicNode"],
+        nodeLabels: ["MemoryNode"],
         relationshipProjection: {
           SIMILARITY: { orientation: "UNDIRECTED", properties: ["weight"] },
-          MENTIONS: { orientation: "UNDIRECTED", properties: { weight: { property: "confidence", defaultValue: 0.5 } } },
         },
       }
     );
@@ -333,8 +332,8 @@ async function processSleepCycleJob(jobId: string): Promise<void> {
         `CALL gds.leiden.write($graphName, {
            relationshipWeightProperty: 'weight',
            writeProperty: 'communityId',
-           gamma: 1.0,
-           theta: 0.01
+           gamma: 2.0,
+           theta: 0.1
          })`,
         { graphName: louvainGraphName }
       );
@@ -345,7 +344,8 @@ async function processSleepCycleJob(jobId: string): Promise<void> {
            relationshipWeightProperty: 'weight',
            writeProperty: 'communityId',
            tolerance: 0.0001,
-           maxIterations: 20
+           maxIterations: 20,
+           resolution: 2.0
          })`,
         { graphName: louvainGraphName }
       );

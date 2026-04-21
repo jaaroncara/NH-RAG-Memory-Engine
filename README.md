@@ -34,37 +34,74 @@ NH-RAG solves these problems by modeling the human brain's memory architecture. 
 
 ### Stage 1 — Encoding (STM)
 
-Every conversational turn is written to the STM as a raw string literal. No embeddings are generated. This makes writes sub-millisecond and keeps the user-interaction "hot path" entirely free of heavy compute. The STM is a sliding time-series window — volatile by design. After a session ends (or a 24-hour threshold), raw logs are flagged for asynchronous promotion.
+Every conversational turn is written to the STM as a raw string literal. No embeddings are generated. This makes writes sub-millisecond and keeps the user-interaction "hot path" entirely free of heavy compute. The STM is a sliding time-series window — volatile by design. Document chunks ingested via the document pipeline are also stored in the STM as `docling_import` entries alongside raw conversation turns.
 
 ### Stage 2 — Associative Mapping (MTM)
 
-During an asynchronous consolidation pass, STM logs are promoted to the MTM. Each log is now embedded for the first time, creating an **Episodic Node** in Neo4j. The system then calculates cosine similarity between the new node and all existing nodes, drawing weighted `SIMILAR_TO` edges where similarity exceeds a threshold (≥ 0.85).
+During an asynchronous consolidation pass, STM logs are promoted to the MTM. Each log is embedded for the first time, creating a **MemoryNode** in Neo4j with one of two sub-labels:
 
-The result is a living knowledge graph where temporally distant but semantically related events become structurally connected. An entry from Monday ("My dog Barnaby is sick") and one from Thursday ("I need a dog-friendly apartment") are linked not by time, but by shared semantic proximity — both connect to the emergent concept of *Barnaby, the dog*.
+- `:MemoryNode:ChatMemory` — for conversational turns
+- `:MemoryNode:DocumentMemory` — for document chunk nodes
 
-### Stage 3 — Algorithmic Forgetting (Synaptic Pruning)
+At the same time, an LLM extracts **semantic entities** from the content — people, locations, projects, tools, and topics — and creates or updates corresponding `TopicNode` records. A `MENTIONS` edge is drawn from each MemoryNode to every TopicNode it references, carrying `confidence` and `mentionCount` weights.
 
-Before any memory reaches the LTM, it must survive pruning. NH-RAG runs **weighted PageRank** (via Neo4j GDS) across the entire MTM graph:
+**SIMILARITY edges are not created at insert time.** They are built lazily during the sleep cycle via GDS KNN (see Stage 3), which avoids O(n²) similarity comparisons on the hot path.
 
-$$PR(u) = (1 - d) + d \sum_{v \in B(u)} \frac{PR(v) \cdot w(v,u)}{L(v)}$$
+### Stage 3 — Sleep-Cycle Consolidation (The Full Pipeline)
 
-Episodic nodes with low centrality scores — those that failed to form meaningful edges with the rest of the graph — are deemed mundane and permanently deleted (`DETACH DELETE`). The Salience Threshold ($\tau$) is dynamically set at the 25th percentile of current PageRank scores. An isolated memory is a mundane memory.
+The sleep cycle is triggered manually via `POST /api/consolidation/sleep-cycle`. It runs as an async background job with 18 tracked steps:
 
-This is **Algorithmic Forgetting**: the agent permanently discards conversational noise before it can pollute the semantic knowledge store.
+#### Step 0 — Clear stale SIMILARITY edges
+All existing `SIMILARITY` edges are deleted before rebuilding so GDS KNN does not accumulate stale relationships alongside new ones.
 
-### Stage 4 — Sleep-Cycle Consolidation (MTM → LTM)
+#### Steps 1–3 — KNN Graph Projection → SIMILARITY Edge Rebuild
+A GDS graph projection is created for all `MemoryNode` nodes and their `embedding` property. `gds.knn.write` computes approximate K-nearest-neighbour cosine similarity (cutoff ≥ 0.82, topK = 10) and writes `SIMILARITY { weight, updatedAt }` edges directly into Neo4j.
 
-After pruning, Louvain Community Detection is run over the surviving graph. This partitions the nodes into dense thematic clusters — mathematically identifying emergent macro-concepts across weeks of interactions.
+#### Steps 4–8 — Weighted PageRank → Salience Threshold (τ)
+A second GDS projection adds `weight` from the SIMILARITY edges and runs `gds.pageRank.stream` (damping = 0.85, 40 iterations). The results are sorted ascending and the **25th-percentile score becomes τ** — the algorithmic forgetting threshold.
 
-A cluster containing fifteen episodic nodes spanning complaints about rent, weather queries near New York, and mentions of a new job offer are not, to the algorithm, fifteen isolated facts. They are a single dense community representing *Relocation to New York*.
+Adaptive guards prevent over-pruning:
+- Skip pruning if fewer than **8** nodes exist
+- Skip pruning if the score range is less than **5 % of the mean** (near-uniform graph — no clear low-salience outliers)
+- Cap the prune set at **20 % of all nodes** per cycle
 
-Each surviving community is passed to an LLM, which synthesizes the entire cluster into a single distilled statement:
+#### Step 9 — Synaptic Pruning
+MemoryNodes with PageRank < τ are permanently deleted (`DETACH DELETE`). Orphaned TopicNodes whose last MemoryNode reference was pruned are also cleaned up. This is **Algorithmic Forgetting**: mundane memories are discarded before they can pollute the LTM.
+
+#### Steps 10–12 — Community Detection (Leiden / Louvain)
+A third GDS projection includes both `MemoryNode` and `TopicNode` with both `SIMILARITY` (cosine weight) and `MENTIONS` (confidence weight) edges. **Leiden** (`gds.leiden.write`) is attempted first; if unavailable, the pipeline falls back to **Louvain** (`gds.louvain.write`). The resulting `communityId` property is written onto every node.
+
+This partitions surviving nodes into dense thematic clusters — mathematically identifying emergent macro-concepts across weeks of interactions. A cluster spanning complaints about rent, weather queries near New York, and mentions of a new job offer is not fifteen isolated facts; it is a single dense community representing *Relocation to New York*.
+
+#### Steps 13–15 — LLM Distillation → LTM Storage
+Each community with ≥ 2 nodes is passed to the LLM with:
+- The raw episodic content of all nodes in the community
+- The top `TopicNode` semantic anchors, ordered by mention count
+- Entity relationship types (via `MENTIONS` edge metadata)
+- Concept domain anchors derived from an internal ontology hierarchy
+
+The LLM synthesizes a single, dense, generalised semantic fact:
 
 > *"User is relocating to New York City for a software job, is highly sensitive to living costs, and requires accommodations that allow their dog, Barnaby."*
 
-This artifact is embedded and stored permanently in the LTM. The originating MTM nodes are then purged. **1,500 tokens of noisy episodic logs become a 30-token precision summary.** This is the core compression gain of NH-RAG.
+This fact is embedded and stored in the LTM (`long_term_memory` table). **1,500 tokens of noisy episodic logs become a 30-token precision summary.**
 
-### Stage 5 — Cascading Retrieval
+#### Step 16 — Topic Node Pruning
+`TopicNode` records that have not been mentioned in **30 days** *and* have a `mentionCount` below **2** are permanently deleted. This prevents the entity graph from accumulating noise from one-off proper nouns.
+
+#### Step 17 — STM Pruning
+Two-pass STM cleanup runs:
+1. **Age-based**: conversation entries older than **72 hours** are deleted (document chunks are excluded — they may not yet have been consolidated into the MTM)
+2. **Count cap**: sessions exceeding **200 rows** have their oldest entries trimmed
+
+Both thresholds are runtime-configurable via `GET/PUT /api/pruning`.
+
+#### Step 18 — LTM Condensation
+Dormant LTM facts (never accessed, `access_count = 0`, older than **60 days**) that are semantically similar to each other (cosine distance < 0.12, i.e., similarity ≥ 0.88) are clustered via union-find. Each cluster is re-distilled by the LLM into a single coarser summary stored with `fidelity_level: "condensed"` in metadata. The source facts are deleted. This mimics neocortical memory compression: old, unused episodic facts merge into abstract semantic knowledge.
+
+All pruning steps are **non-fatal**: a failure in any housekeeping step is caught and logged, and the sleep cycle still completes.
+
+### Stage 4 — Cascading Retrieval
 
 At inference time, NH-RAG uses a **parallelized, two-track retrieval strategy** rather than a single monolithic vector search:
 
@@ -97,23 +134,34 @@ The MTM graph is reserved as an **on-demand fallback** via explicit tool use —
 User Input
     │
     ▼
-┌─────────────────────────────────┐
-│  STM (PostgreSQL)               │  ← Raw text, sub-ms writes, deterministic SQL recall
-│  short_term_memory table        │
-└────────────────┬────────────────┘
-                 │  async promotion
+┌─────────────────────────────────────────────────────┐
+│  STM (PostgreSQL)                                   │  ← Raw text, sub-ms writes, deterministic SQL recall
+│  short_term_memory table                            │  ← source_type: 'conversation' | 'docling_import'
+└────────────────┬────────────────────────────────────┘
+                 │  async promotion (consolidateToMTM)
                  ▼
-┌─────────────────────────────────┐
-│  MTM (Neo4j + GDS)              │  ← Embed → EpisodicNodes → SIMILAR_TO edges
-│  PageRank pruning               │  ← Salience Threshold τ (25th percentile)
-│  Louvain community detection    │  ← Thematic clustering
-└────────────────┬────────────────┘
-                 │  LLM distillation
+┌─────────────────────────────────────────────────────┐
+│  MTM (Neo4j + GDS)                                  │
+│                                                     │
+│  :MemoryNode:ChatMemory    :MemoryNode:DocumentMemory│  ← Bipartite node types
+│         │                          │                │
+│         └──────── SIMILARITY ──────┘  ← KNN-rebuilt │   each sleep cycle (cosine ≥ 0.82)
+│         │                                           │
+│         └──── MENTIONS ──→ :TopicNode               │  ← LLM entity extraction
+│                            (person / location /     │
+│                             project / tool / topic) │
+│                                                     │
+│  GDS Pipeline (sleep cycle):                        │
+│    KNN write → PageRank → τ pruning                 │
+│    Leiden community detection → LTM distillation    │
+│    Topic pruning → STM pruning → LTM condensation   │
+└────────────────┬────────────────────────────────────┘
+                 │  LLM distillation (Leiden community → fact)
                  ▼
-┌─────────────────────────────────┐
-│  LTM (PostgreSQL + pgvector)    │  ← Distilled facts, HNSW index, cosine search
-│  long_term_memory table         │
-└─────────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│  LTM (PostgreSQL + pgvector)                        │  ← Distilled facts, HNSW index, cosine search
+│  long_term_memory table                             │  ← access_count + dormancy-based condensation
+└─────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -121,7 +169,7 @@ User Input
 ## Prerequisites
 
 - **Node.js** ≥ 18
-- **Docker** & **Docker Compose**
+- **Docker** or **Podman** & **Compose**
 
 ---
 
@@ -158,7 +206,7 @@ User Input
 
 ## MCP Integration API
 
-This app now exposes a dedicated integration surface for external callers such as your MCP server. The existing `/api/*` routes remain in place for the operator console and internal/debug workflows, while the new integration layer is intended to be the stable service-to-service contract.
+This app exposes a dedicated integration surface for external callers such as your MCP server. The existing `/api/*` routes remain in place for the operator console and internal/debug workflows, while the integration layer is the stable service-to-service contract.
 
 Default base path:
 
@@ -202,7 +250,7 @@ Operator-only note:
 
 ### 1. Infrastructure services
 
-The commands below can be run with either Docker or Podman. The project scripts now prefer `podman` automatically when it is installed and fall back to `docker` otherwise.
+The commands below can be run with either Docker or Podman. The project scripts prefer `podman` automatically when it is installed and fall back to `docker` otherwise.
 
 Start PostgreSQL, Neo4j, and the Docling sidecar:
 
@@ -224,7 +272,7 @@ To build and run the entire stack in containers, including the app itself:
 npm run dev
 ```
 
-This now runs:
+This runs:
 
 ```bash
 podman compose up --build
@@ -259,9 +307,9 @@ npm run dev:server
 
 This project does **not** run separate frontend and backend dev commands. The Node server in [server.ts](server.ts) mounts Vite middleware, so the React frontend is served from the same process on port `3000`.
 
-### 3. Optional migration step for existing databases
+### 5. Optional migration step for existing databases
 
-If your Postgres volume already existed before the operator-console changes, run:
+If your Postgres volume already existed before recent schema changes, run:
 
 ```bash
 npm run db:migrate
@@ -338,13 +386,13 @@ npm run infra:down
 
 ## Operator Console
 
-The frontend now behaves as a database-oriented control plane rather than a message composer. The primary surfaces are:
+The frontend behaves as a database-oriented control plane rather than a message composer. The primary surfaces are:
 
 - **Documents:** upload one or more files, inspect chunk extraction, and trace import events.
 - **STM:** paginated PostgreSQL view of raw episodic rows, including document-derived chunks.
-- **MTM Graph:** Neo4j subgraph explorer for recent episodic nodes and similarity edges.
+- **MTM Graph:** Neo4j subgraph explorer for recent episodic nodes, TopicNodes, SIMILARITY edges, and MENTIONS edges.
 - **LTM:** pgvector-backed distilled fact store.
-- **Jobs:** ingestion and sleep-cycle execution timeline.
+- **Jobs:** ingestion and sleep-cycle execution timeline with per-step pipeline events.
 
 If the Docling sidecar is not running, plain-text and Markdown files still import via a local fallback parser, but richer formats require Docling.
 
@@ -360,16 +408,29 @@ If the Docling sidecar is not running, plain-text and Markdown files still impor
 | `GET` | `/api/documents` | List imported documents |
 | `POST` | `/api/documents/import` | Upload and ingest one or more documents through Docling |
 | `GET` | `/api/documents/:documentId` | Get chunk detail and event lineage for a document |
-| `POST` | `/api/mtm/consolidate` | Embed an interaction and add it as a node in the MTM graph |
-| `GET` | `/api/mtm/graph` | Fetch a bounded Neo4j subgraph snapshot for visualization |
-| `POST` | `/api/consolidation/sleep-cycle` | Run the full sleep-cycle: PageRank pruning → Louvain clustering → LLM distillation → LTM storage |
+| `POST` | `/api/mtm/consolidate` | Embed an interaction and add it as a MemoryNode in the MTM graph with entity extraction |
+| `GET` | `/api/mtm/graph` | Fetch a bounded Neo4j subgraph snapshot (MemoryNodes + TopicNodes + edges) for visualization |
+| `POST` | `/api/consolidation/sleep-cycle` | Run the full 18-step sleep cycle: KNN rebuild → PageRank pruning → Leiden community detection → LLM distillation → LTM storage → topic pruning → STM pruning → LTM condensation |
 | `GET` | `/api/ltm/search?q=...` | ANN cosine search over distilled long-term facts |
 | `GET` | `/api/ltm/facts` | Paginated LTM fact explorer |
+| `GET` | `/api/pruning` | Get current runtime pruning configuration |
+| `PUT` | `/api/pruning` | Update runtime pruning configuration |
 | `GET` | `/api/jobs` | List ingestion and consolidation jobs |
 | `GET` | `/api/jobs/events` | List pipeline events across jobs/documents |
 | `GET` | `/api/metrics/overview` | Operator dashboard metrics and recent activity |
 | `GET` | `/api/memory/stats` | Row/node counts across all three memory tiers |
 | `GET` | `/api/health` | Database connectivity health check |
+
+### Pruning Configuration
+
+The pruning config is an in-memory singleton (reset on server restart) with the following defaults:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `stmMaxAgeHours` | `72` | Conversation entries older than this are deleted from STM (document chunks excluded) |
+| `stmMaxRowsPerSession` | `200` | Sessions exceeding this row count have oldest entries trimmed |
+| `ltmDormancyDays` | `60` | LTM facts with `access_count = 0` older than this are eligible for condensation |
+| `ltmSimilarityThreshold` | `0.88` | Cosine similarity threshold for LTM condensation clustering |
 
 ---
 
